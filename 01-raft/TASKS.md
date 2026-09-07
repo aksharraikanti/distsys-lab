@@ -7,10 +7,18 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
       structs, a bare `Raft` struct holding server state, and a pluggable transport
       interface (real net/rpc for normal runs, an in-process fake transport for later
       fault-injection tests — this is what makes Day 12 tractable). Get 3 in-process
-      mock nodes talking over it. No election/replication logic yet.
+      mock nodes talking over it. No election/replication logic yet. Make election/
+      heartbeat timeouts tunable constants set small (10-50ms) — this is what MIT
+      6.5840's labrpc-based Raft labs do, and it's what keeps Day 12's fault-injection
+      suite running in seconds instead of minutes.
 - [ ] **Day 2 — Server states.** Implement the Follower/Candidate/Leader state enum
       and the transition rules between them. No elections triggered yet — just prove
-      the state machine transitions correctly under manual calls.
+      the state machine transitions correctly under manual calls. All reads/writes to
+      the shared Raft state (currentTerm, votedFor, log, commitIndex, ...) go through
+      a single mutex from this day forward — this is the struct's founding day, so
+      it's the right place to establish the invariant. Write a test that fires
+      concurrent goroutines (RPC handlers + the election timer) at the same instance
+      and confirm it's clean under `go test -race`.
 - [ ] **Day 3 — Election timeouts.** Randomized election timeout per node; trigger a
       Follower → Candidate transition when no heartbeat arrives in time.
 - [ ] **Day 4 — Leader election.** Implement `RequestVote` handling and vote counting.

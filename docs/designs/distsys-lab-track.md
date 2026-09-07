@@ -36,8 +36,10 @@ A single root `TASKS.md` listing every day across all 10 stages as checkboxes, c
 Approach A. The per-stage README doubles as a running concept journal (valuable both for retention and as portfolio evidence of understanding, not just code), and CI gives a same-day correctness signal, which matters most on a 10-stage, multi-month solo track where later stages depend on earlier ones actually being correct.
 
 ## Open Questions
-- Whether daily commits should be squashed per-stage before merging to main, or kept as-is for a granular history (default: kept as-is, matching the prior harness-project pattern of one commit per working day).
 - Exact pacing for stages beyond Stage 1 — will be scoped stage-by-stage as each is reached, rather than front-loading a day-by-day breakdown for all 10 stages now.
+
+## Decisions Made During Review
+- Daily commits stay granular (one per working day, unsquashed) — matches the prior harness-project pattern. Decided during /plan-eng-review rather than left open.
 
 ## Success Criteria
 - A public GitHub repo with roughly one commit per working day, each a small, reviewable, working increment.
