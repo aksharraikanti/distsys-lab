@@ -3,7 +3,7 @@
 Each day: read/learn the concept first, implement it, write a quick test, commit.
 Check a box only once it's implemented AND tested — "read about it" isn't done.
 
-- [ ] **Day 1 — RPC scaffolding.** Define the `RequestVote` and `AppendEntries` RPC
+- [x] **Day 1 — RPC scaffolding.** Define the `RequestVote` and `AppendEntries` RPC
       structs, a bare `Raft` struct holding server state, and a pluggable transport
       interface (real net/rpc for normal runs, an in-process fake transport for later
       fault-injection tests — this is what makes Day 12 tractable). Get 3 in-process
