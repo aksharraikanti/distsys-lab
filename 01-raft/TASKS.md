@@ -22,7 +22,10 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
 - [ ] **Day 3 — Election timeouts.** Randomized election timeout per node; trigger a
       Follower → Candidate transition when no heartbeat arrives in time.
 - [ ] **Day 4 — Leader election.** Implement `RequestVote` handling and vote counting.
-      Get a single leader elected among 3 nodes with no faults.
+      Get a single leader elected among 3 nodes with no faults. `RequestVote`
+      correctness — term comparison, the log up-to-dateness check — is where most
+      first-time Raft implementers actually get stuck; budget for this one running
+      long.
 - [ ] **Day 5 — Heartbeats.** Leader sends periodic empty `AppendEntries` as
       heartbeats; followers reset their election timer on receipt.
 - [ ] **Day 6 — Election edge cases.** Split votes, term numbers, stale-leader
@@ -36,7 +39,9 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
 - [ ] **Day 10 — Log consistency check.** Implement the `AppendEntries` consistency
       check (prevLogIndex/prevLogTerm) so followers reject/truncate divergent logs.
 - [ ] **Day 11 — Persistence.** Persist term, vote, and log to disk so a crashed node
-      recovers correctly on restart.
+      recovers correctly on restart. Fsync semantics and crash-consistency (partial
+      writes, ordering) are notoriously non-obvious the first time — budget for this
+      one running long too.
 - [ ] **Day 12(-13) — Fault injection tests.** Using the fake transport from Day 1,
       simulate leader crashes, network partitions, and follower restarts; verify the
       cluster always converges to a single consistent log. This is the hardest day in
