@@ -11,7 +11,7 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
       heartbeat timeouts tunable constants set small (10-50ms) — this is what MIT
       6.5840's labrpc-based Raft labs do, and it's what keeps Day 12's fault-injection
       suite running in seconds instead of minutes.
-- [ ] **Day 2 — Server states.** Implement the Follower/Candidate/Leader state enum
+- [x] **Day 2 — Server states.** Implement the Follower/Candidate/Leader state enum
       and the transition rules between them. No elections triggered yet — just prove
       the state machine transitions correctly under manual calls. All reads/writes to
       the shared Raft state (currentTerm, votedFor, log, commitIndex, ...) go through
