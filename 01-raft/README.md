@@ -73,6 +73,37 @@ this.)_
   either wastes time being over-cautious or is flaky being too tight — polling
   succeeds the instant the real condition is true, on whatever machine runs it.
 
+### Day 4 — Leader election
+- This was the day flagged in advance as likely to run long, and it did — the
+  actual RequestVote/AppendEntries *rules* (Day 1) were easy; the part that took
+  real thought was the *concurrency* of running an election: firing RPCs to every
+  peer at once, then having each reply handler independently decide "does this
+  still matter?" before touching shared state.
+- The three guard conditions in `startElection`'s per-reply handler
+  (`reply.Term > r.currentTerm`, `r.state != Candidate`, `r.currentTerm != term`)
+  aren't defensive padding — each one is a real race a slow network can trigger.
+  A reply can arrive after the candidate already won on other votes, after it
+  lost and became a Follower, or after it gave up and started a *newer* election.
+  Any one of those means "this reply belongs to a decision that's already over,"
+  and applying it anyway would be a genuine correctness bug, not just untidy code.
+- `becomeFollowerLocked`/`becomeCandidateLocked`/`becomeLeaderLocked` exist
+  because `startElection`'s reply handler is already holding `r.mu` when it needs
+  to transition state — calling the public `BecomeFollower()` etc. from inside
+  that handler would deadlock against itself. This is exactly the kind of bug
+  the design doc predicted first-timers hit on this day, just one layer removed:
+  not "was my term comparison right" but "did I re-lock a mutex I'm already
+  holding."
+- The log-up-to-date check (`candidateLogIsUpToDateLocked`) is written against
+  the *general* rule even though the log is empty until Day 7 — every node's log
+  is trivially tied right now, so the check always passes today. Writing the real
+  rule now instead of a temporary stub means Day 7 doesn't need to come back and
+  rewrite Day 4's voting logic.
+- `votes` (the vote-counting integer in `startElection`) is a plain `int`, not an
+  atomic — safe here only because every access happens inside a `r.mu.Lock()`
+  section already required for the state checks above it. If a future refactor
+  ever separates vote-counting from state-checking into two different locked
+  sections, that safety argument breaks silently.
+
 ### Day 2 — Server states
 -
 

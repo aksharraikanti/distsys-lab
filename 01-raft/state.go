@@ -53,7 +53,13 @@ func (r *Raft) Term() int {
 func (r *Raft) BecomeFollower(term int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.becomeFollowerLocked(term)
+}
 
+// becomeFollowerLocked is BecomeFollower's implementation, for callers that
+// already hold r.mu (Day 4's election-response handling needs this — it
+// can't call the locking BecomeFollower without deadlocking itself).
+func (r *Raft) becomeFollowerLocked(term int) {
 	if term > r.currentTerm {
 		r.currentTerm = term
 		r.votedFor = -1
@@ -70,7 +76,10 @@ func (r *Raft) BecomeFollower(term int) {
 func (r *Raft) BecomeCandidate() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.becomeCandidateLocked()
+}
 
+func (r *Raft) becomeCandidateLocked() error {
 	if r.state == Leader {
 		return fmt.Errorf("raft: invalid transition Leader -> Candidate")
 	}
@@ -86,7 +95,10 @@ func (r *Raft) BecomeCandidate() error {
 func (r *Raft) BecomeLeader() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.becomeLeaderLocked()
+}
 
+func (r *Raft) becomeLeaderLocked() error {
 	if r.state != Candidate {
 		return fmt.Errorf("raft: invalid transition %s -> Leader (must come from Candidate)", r.state)
 	}
