@@ -21,7 +21,7 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
       and confirm it's clean under `go test -race`.
 - [x] **Day 3 — Election timeouts.** Randomized election timeout per node; trigger a
       Follower → Candidate transition when no heartbeat arrives in time.
-- [ ] **Day 4 — Leader election.** Implement `RequestVote` handling and vote counting.
+- [x] **Day 4 — Leader election.** Implement `RequestVote` handling and vote counting.
       Get a single leader elected among 3 nodes with no faults. `RequestVote`
       correctness — term comparison, the log up-to-dateness check — is where most
       first-time Raft implementers actually get stuck; budget for this one running

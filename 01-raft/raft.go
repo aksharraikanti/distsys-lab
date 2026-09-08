@@ -76,15 +76,42 @@ func NewRaft(id int, peers []int, transport Transport) *Raft {
 	}
 }
 
-// RequestVote is a stub RPC handler for Day 1 — it always reports the
-// current term and refuses the vote. Real election logic (term
-// comparison, log up-to-dateness check) lands Day 4.
+// RequestVote handles an incoming vote request (Raft paper §5.2, §5.4).
+// A vote is granted only if all of: the candidate's term is at least as
+// current as this node's, this node hasn't already voted for someone else
+// this term, and the candidate's log is at least as up-to-date as this
+// node's (candidateLogIsUpToDateLocked) — that last check is what stops a
+// node with a stale, incomplete log from ever becoming leader and losing
+// committed entries.
 func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if args.Term > r.currentTerm {
+		r.becomeFollowerLocked(args.Term)
+	}
 	reply.Term = r.currentTerm
-	reply.VoteGranted = false
+
+	if args.Term < r.currentTerm {
+		reply.VoteGranted = false
+		return nil
+	}
+
+	alreadyVotedForSomeoneElse := r.votedFor != -1 && r.votedFor != args.CandidateID
+	logIsUpToDate := r.candidateLogIsUpToDateLocked(args.LastLogIndex, args.LastLogTerm)
+
+	if alreadyVotedForSomeoneElse || !logIsUpToDate {
+		reply.VoteGranted = false
+		return nil
+	}
+
+	r.votedFor = args.CandidateID
+	reply.VoteGranted = true
+	// Granting a vote means this node just heard from a legitimate,
+	// at-least-as-current candidate — that resets how long it waits before
+	// starting its own election. ResetElectionTimer only touches a channel,
+	// never r.mu, so calling it while still holding the lock is safe.
+	r.ResetElectionTimer()
 	return nil
 }
 

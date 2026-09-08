@@ -4,8 +4,13 @@ import "testing"
 
 // TestFakeTransportThreeNodes wires 3 nodes together over a FakeTransport
 // and confirms every node can reach every other node — the Day 1 bar:
-// "get 3 in-process mock nodes talking over it. No election/replication
-// logic yet."
+// "get 3 in-process mock nodes talking over it."
+//
+// This only checks RPC connectivity (calls succeed, replies come back),
+// not voting semantics — Day 4 added real RequestVote logic, and
+// election_test.go is where that behavior is exhaustively tested. Using
+// Term: -1 here (below any node's starting currentTerm of 0) keeps the
+// RequestVote assertion deterministic without re-testing Day 4's rules.
 func TestFakeTransportThreeNodes(t *testing.T) {
 	transport := NewFakeTransport()
 	ids := []int{0, 1, 2}
@@ -24,14 +29,12 @@ func TestFakeTransportThreeNodes(t *testing.T) {
 				continue
 			}
 			var reply RequestVoteReply
-			args := &RequestVoteArgs{Term: 1, CandidateID: from}
+			args := &RequestVoteArgs{Term: -1, CandidateID: from}
 			if err := nodes[from].transport.CallRequestVote(to, args, &reply); err != nil {
 				t.Fatalf("node %d -> node %d RequestVote failed: %v", from, to, err)
 			}
-			// Day 1 stub always refuses the vote — this test only proves
-			// the RPC round-trips, not that voting logic exists yet.
 			if reply.VoteGranted {
-				t.Fatalf("node %d granted a vote in Day 1's stub handler; expected false", to)
+				t.Fatalf("node %d granted a vote for a stale (negative) term; expected false", to)
 			}
 
 			var aeReply AppendEntriesReply
@@ -39,8 +42,10 @@ func TestFakeTransportThreeNodes(t *testing.T) {
 			if err := nodes[from].transport.CallAppendEntries(to, aeArgs, &aeReply); err != nil {
 				t.Fatalf("node %d -> node %d AppendEntries failed: %v", from, to, err)
 			}
+			// AppendEntries is still a stub — real replication/heartbeat
+			// logic lands Day 5+.
 			if aeReply.Success {
-				t.Fatalf("node %d reported AppendEntries success in Day 1's stub handler; expected false", to)
+				t.Fatalf("node %d reported AppendEntries success in the still-stub handler; expected false", to)
 			}
 		}
 	}
@@ -79,11 +84,13 @@ func TestNetTransportThreeNodes(t *testing.T) {
 	}
 
 	var reply RequestVoteReply
-	if err := transport.CallRequestVote(1, &RequestVoteArgs{Term: 1, CandidateID: 0}, &reply); err != nil {
+	// Term: -1 (below any node's starting currentTerm of 0) keeps this a
+	// pure connectivity check — see TestFakeTransportThreeNodes for why.
+	if err := transport.CallRequestVote(1, &RequestVoteArgs{Term: -1, CandidateID: 0}, &reply); err != nil {
 		t.Fatalf("node 0 -> node 1 RequestVote over net/rpc failed: %v", err)
 	}
 	if reply.VoteGranted {
-		t.Fatalf("node 1 granted a vote in Day 1's stub handler; expected false")
+		t.Fatalf("node 1 granted a vote for a stale (negative) term; expected false")
 	}
 }
 

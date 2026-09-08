@@ -45,7 +45,13 @@ func (r *Raft) RunElectionTimer() {
 			// waiting to hear from anyone, so a fired timer here just
 			// means restart the countdown and keep leading.
 			if r.State() != Leader {
-				_ = r.BecomeCandidate()
+				if err := r.BecomeCandidate(); err == nil {
+					// Run in its own goroutine: sending RequestVote RPCs
+					// to every peer must never block this timer loop —
+					// a slow or unreachable peer would otherwise stall
+					// the node's ability to notice its own next timeout.
+					go r.startElection()
+				}
 			}
 			timer.Reset(r.randomElectionTimeout())
 		}

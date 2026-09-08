@@ -1,8 +1,8 @@
 # Progress
 
 Current stage: **01-raft**
-Current day: **Day 4 — Leader election** (next up)
-Status: Day 3 complete
+Current day: **Day 5 — Heartbeats** (next up)
+Status: Day 4 complete
 
 ## Log
 
@@ -15,6 +15,10 @@ Status: Day 3 complete
   concurrent race test (RPC handlers + simulated election-timer firing at the
   same instance) clean under `go test -race`.
 - 2026-09-08 — Day 3 (Election timeouts) complete: randomized per-node election
-  timeout, reset/stop signaling, Follower -> Candidate on timeout, Leader
-  correctly ignores its own timeout. Timing tests use condition polling
-  (`waitFor`) rather than fixed sleeps to stay flake-resistant.
+  timeout, reset/stop signaling, Follower -> Candidate on timeout. Timing tests
+  use condition polling (`waitFor`) rather than fixed sleeps.
+- 2026-09-08 — Day 4 (Leader election) complete: real RequestVote logic (term
+  comparison, one-vote-per-term, log up-to-date check), concurrent vote-counting
+  in `startElection`, and an end-to-end test proving 3 nodes converge on exactly
+  one leader via their real election timers. Ran long as predicted — the
+  concurrency of the election, not the RPC rules themselves, was the hard part.
