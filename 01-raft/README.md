@@ -33,6 +33,27 @@ this.)_
   logic exists yet. That logic starts Day 3-4.
 
 ### Day 2 — Server states
+- The three roles (Follower/Candidate/Leader) aren't a free-for-all state machine —
+  Raft only allows specific transitions. Codifying which ones are illegal
+  (`Follower -> Leader` directly, `Leader -> Candidate`) turned out to be as
+  important as the ones that are legal; a state enum with no transition rules is
+  just a label, not a state *machine*.
+- The subtle one: `BecomeFollower` only resets `votedFor` when the term actually
+  advances. A Candidate that loses an election and steps back to Follower *in the
+  same term* must remember who it already voted for — otherwise a node could vote
+  twice in one term through a state-transition side door, which is exactly the kind
+  of bug that looks fine in a demo and breaks safety under partition.
+- `BecomeCandidate` increments the term and votes for itself in one atomic step
+  (single mutex hold) — if those were two separate locked sections, a concurrent
+  RPC could observe a half-updated state (new term, stale vote) that never legally
+  exists.
+- The Day 2 race test (`TestConcurrentStateAccess`) doesn't have a real election
+  timer to race against yet (that's Day 3) — it stands a goroutine that hammers
+  `BecomeCandidate()` in for it. The point isn't the specific goroutine, it's
+  proving the mutex makes *any* concurrent caller safe, whatever ends up calling
+  these methods later.
+
+### Day 2 — Server states
 -
 
 _(continue per day)_

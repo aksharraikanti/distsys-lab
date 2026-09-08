@@ -20,18 +20,13 @@ const (
 	HeartbeatInterval  = 10 * time.Millisecond
 )
 
-// serverState is a placeholder for the Follower/Candidate/Leader state
-// machine — the real enum and transition rules land Day 2 (see TASKS.md).
-// Day 1 only needs enough of a Raft struct to answer RPCs, so this stays
-// unused for now.
-type serverState int
-
-// Raft holds one node's state. Day 1 scope: the struct exists and can
-// answer RPC calls (currently stub replies); real election and log
-// replication logic land on Days 2-10.
+// Raft holds one node's state. Day 1 scope was just enough of this struct
+// to answer RPCs; Day 2 adds the Follower/Candidate/Leader state machine
+// (state.go). Real election and log replication logic land on Days 3-10.
 //
-// mu protects every field below it. Stage 1 Day 2 makes this invariant
-// explicit with a concurrent-access test — see 01-raft/TASKS.md.
+// mu protects every field below it — this is Day 2's founding invariant,
+// proven by TestConcurrentStateAccess in state_test.go (RPC handlers and
+// state transitions firing concurrently, clean under `go test -race`).
 type Raft struct {
 	mu sync.Mutex
 
@@ -39,6 +34,7 @@ type Raft struct {
 	peers     []int
 	transport Transport
 
+	state       serverState
 	currentTerm int
 	votedFor    int
 	log         []LogEntry
@@ -48,13 +44,15 @@ type Raft struct {
 }
 
 // NewRaft constructs a node with the given id, its peer ids, and the
-// transport it should use to reach them. votedFor starts at -1 (no peer
-// id is negative), meaning "hasn't voted this term."
+// transport it should use to reach them. Every node starts as a Follower
+// with votedFor at -1 (no peer id is negative), meaning "hasn't voted this
+// term."
 func NewRaft(id int, peers []int, transport Transport) *Raft {
 	return &Raft{
 		id:        id,
 		peers:     peers,
 		transport: transport,
+		state:     Follower,
 		votedFor:  -1,
 	}
 }
