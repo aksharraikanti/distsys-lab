@@ -5,6 +5,7 @@
 package raft
 
 import (
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -41,6 +42,20 @@ type Raft struct {
 
 	commitIndex int
 	lastApplied int
+
+	// Election-timer machinery (Day 3, election_timer.go). resetElectionTimer
+	// is buffered so ResetElectionTimer never blocks its caller — a dropped
+	// reset just means the current countdown runs a little longer, which is
+	// harmless; a blocked RPC handler waiting on channel space is not.
+	resetElectionTimer chan struct{}
+	stopCh             chan struct{}
+	stopOnce           sync.Once
+
+	// rng is per-node (not the global math/rand source) so concurrently
+	// created nodes don't share timing state, and rngMu protects it since
+	// *rand.Rand is not safe for concurrent use.
+	rng   *rand.Rand
+	rngMu sync.Mutex
 }
 
 // NewRaft constructs a node with the given id, its peer ids, and the
@@ -54,6 +69,10 @@ func NewRaft(id int, peers []int, transport Transport) *Raft {
 		transport: transport,
 		state:     Follower,
 		votedFor:  -1,
+
+		resetElectionTimer: make(chan struct{}, 1),
+		stopCh:             make(chan struct{}),
+		rng:                rand.New(rand.NewSource(time.Now().UnixNano() ^ int64(id))),
 	}
 }
 

@@ -19,7 +19,7 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
       it's the right place to establish the invariant. Write a test that fires
       concurrent goroutines (RPC handlers + the election timer) at the same instance
       and confirm it's clean under `go test -race`.
-- [ ] **Day 3 — Election timeouts.** Randomized election timeout per node; trigger a
+- [x] **Day 3 — Election timeouts.** Randomized election timeout per node; trigger a
       Follower → Candidate transition when no heartbeat arrives in time.
 - [ ] **Day 4 — Leader election.** Implement `RequestVote` handling and vote counting.
       Get a single leader elected among 3 nodes with no faults. `RequestVote`

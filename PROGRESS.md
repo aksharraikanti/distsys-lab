@@ -1,8 +1,8 @@
 # Progress
 
 Current stage: **01-raft**
-Current day: **Day 3 — Election timeouts** (next up)
-Status: Day 2 complete
+Current day: **Day 4 — Leader election** (next up)
+Status: Day 3 complete
 
 ## Log
 
@@ -14,3 +14,7 @@ Status: Day 2 complete
   machine with enforced transition rules, mutex-protected shared state, and a
   concurrent race test (RPC handlers + simulated election-timer firing at the
   same instance) clean under `go test -race`.
+- 2026-09-08 — Day 3 (Election timeouts) complete: randomized per-node election
+  timeout, reset/stop signaling, Follower -> Candidate on timeout, Leader
+  correctly ignores its own timeout. Timing tests use condition polling
+  (`waitFor`) rather than fixed sleeps to stay flake-resistant.
