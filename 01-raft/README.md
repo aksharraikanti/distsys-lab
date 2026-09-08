@@ -53,6 +53,26 @@ this.)_
   proving the mutex makes *any* concurrent caller safe, whatever ends up calling
   these methods later.
 
+### Day 3 — Election timeouts
+- The *randomization* is the whole point, not an implementation detail. If every
+  node used the same fixed timeout, every node would notice a leader failure and
+  become a Candidate in the same instant — every election would split every time,
+  forever. A random duration per node (in a range) means whoever's timer fires
+  first usually gets a clean head start before anyone else even notices.
+- The reset channel is deliberately non-blocking (`select { case ch <- struct{}{}: default: }`).
+  A blocking reset would mean an RPC handler could stall waiting for the timer
+  goroutine to be ready to receive — and a dropped reset is harmless (worst case,
+  the current countdown just runs a bit longer), so there's nothing to protect by
+  blocking.
+- `timer.Stop()` returning `false` means the timer already fired and its value is
+  sitting unread in the channel — you have to drain it (`<-timer.C`) before calling
+  `Reset`, or the old fire event leaks through on the next loop iteration. This is
+  a genuinely easy trap in Go's `time.Timer` API, not specific to Raft.
+- Testing a timing-dependent system without flakiness meant polling for the
+  condition (`waitFor`) instead of `sleep(exactDuration); assert`. A fixed sleep
+  either wastes time being over-cautious or is flaky being too tight — polling
+  succeeds the instant the real condition is true, on whatever machine runs it.
+
 ### Day 2 — Server states
 -
 
