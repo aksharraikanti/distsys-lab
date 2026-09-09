@@ -26,7 +26,7 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
       correctness — term comparison, the log up-to-dateness check — is where most
       first-time Raft implementers actually get stuck; budget for this one running
       long.
-- [ ] **Day 5 — Heartbeats.** Leader sends periodic empty `AppendEntries` as
+- [x] **Day 5 — Heartbeats.** Leader sends periodic empty `AppendEntries` as
       heartbeats; followers reset their election timer on receipt.
 - [ ] **Day 6 — Election edge cases.** Split votes, term numbers, stale-leader
       rejection. Test with simulated node restarts.

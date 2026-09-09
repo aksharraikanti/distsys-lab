@@ -104,6 +104,36 @@ this.)_
   ever separates vote-counting from state-checking into two different locked
   sections, that safety argument breaks silently.
 
+### Day 5 — Heartbeats
+- The `HeartbeatInterval` constant had been sitting at exactly `10ms` — the same
+  value as `ElectionTimeoutMin` — since Day 1, and nothing caught it because
+  nothing depended on the *gap* between the two constants until heartbeats
+  actually started resetting timers today. Standard Raft guidance wants
+  broadcast time well under the election timeout floor (5-10x), so I dropped
+  `HeartbeatInterval` to `2ms`. This is the kind of bug that's invisible until
+  the exact day it becomes load-bearing — worth remembering for any tunable
+  constant introduced before its consumer exists.
+- `AppendEntries`'s real logic turned out to be almost a mirror of `RequestVote`'s
+  from Day 4: same "become follower if the term is at least current" pattern,
+  same reliance on `becomeFollowerLocked`'s built-in "only reset votedFor if the
+  term actually advanced" safety. Writing Day 4 and Day 5's handlers back to back
+  made a pattern obvious that wasn't obvious reading the paper linearly: both RPCs
+  are really "prove you're at least as current as me, and I'll acknowledge you,"
+  just with different acknowledgment payloads (a vote vs. a success flag).
+- The one-line reason a Candidate steps down on a *same-term* AppendEntries (not
+  just a higher-term one) is subtle enough to be worth stating plainly: while an
+  election is in flight, it's entirely possible another candidate already won
+  *this exact term* and is now sending heartbeats. Ignoring that (only stepping
+  down on strictly higher terms) would let two nodes both believe they're leader
+  of the same term simultaneously — a real safety violation, not just a
+  liveness hiccup.
+- `TestHeartbeatsKeepLeaderStable` is the day's real payoff test: Day 4's
+  `TestElectionEndToEndViaTimer` only proved a leader *gets elected*; nothing
+  stopped a follower from later timing out and deposing it. This test proves
+  the missing piece — once heartbeats exist, leadership actually stays put
+  through many election-timeout cycles, which is the whole point of heartbeats
+  existing at all.
+
 ### Day 2 — Server states
 -
 

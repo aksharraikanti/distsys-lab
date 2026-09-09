@@ -7,10 +7,12 @@ import "testing"
 // "get 3 in-process mock nodes talking over it."
 //
 // This only checks RPC connectivity (calls succeed, replies come back),
-// not voting semantics — Day 4 added real RequestVote logic, and
-// election_test.go is where that behavior is exhaustively tested. Using
-// Term: -1 here (below any node's starting currentTerm of 0) keeps the
-// RequestVote assertion deterministic without re-testing Day 4's rules.
+// not voting/heartbeat semantics — Day 4 gave RequestVote real logic and
+// Day 5 gave AppendEntries real logic; election_test.go and
+// heartbeat_test.go are where that behavior is exhaustively tested. Using
+// Term: -1 for both calls here (below any node's starting currentTerm of
+// 0) keeps this a deterministic connectivity check without re-testing
+// either day's rules.
 func TestFakeTransportThreeNodes(t *testing.T) {
 	transport := NewFakeTransport()
 	ids := []int{0, 1, 2}
@@ -38,14 +40,12 @@ func TestFakeTransportThreeNodes(t *testing.T) {
 			}
 
 			var aeReply AppendEntriesReply
-			aeArgs := &AppendEntriesArgs{Term: 1, LeaderID: from}
+			aeArgs := &AppendEntriesArgs{Term: -1, LeaderID: from}
 			if err := nodes[from].transport.CallAppendEntries(to, aeArgs, &aeReply); err != nil {
 				t.Fatalf("node %d -> node %d AppendEntries failed: %v", from, to, err)
 			}
-			// AppendEntries is still a stub — real replication/heartbeat
-			// logic lands Day 5+.
 			if aeReply.Success {
-				t.Fatalf("node %d reported AppendEntries success in the still-stub handler; expected false", to)
+				t.Fatalf("node %d reported AppendEntries success for a stale (negative) term; expected false", to)
 			}
 		}
 	}
