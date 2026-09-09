@@ -15,10 +15,17 @@ import (
 // same choice MIT 6.5840's labrpc-based Raft labs make: it's what keeps
 // Stage 1 Day 12's fault-injection suite running in seconds instead of
 // minutes. See 01-raft/TASKS.md Day 1.
+//
+// HeartbeatInterval must sit well below ElectionTimeoutMin — the standard
+// Raft guidance is broadcastTime << electionTimeout, usually by 5-10x —
+// or a follower can legitimately time out and start an election before
+// its next heartbeat was even due to arrive. It only became load-bearing
+// once Day 5 wired heartbeats up to actually reset followers' timers;
+// before that, nothing depended on the gap between the two.
 const (
 	ElectionTimeoutMin = 10 * time.Millisecond
 	ElectionTimeoutMax = 50 * time.Millisecond
-	HeartbeatInterval  = 10 * time.Millisecond
+	HeartbeatInterval  = 2 * time.Millisecond
 )
 
 // Raft holds one node's state. Day 1 scope was just enough of this struct
@@ -115,14 +122,32 @@ func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error
 	return nil
 }
 
-// AppendEntries is a stub RPC handler for Day 1 — it always reports the
-// current term and reports failure. Real replication/heartbeat logic
-// lands Days 5, 7-10.
+// AppendEntries handles an incoming heartbeat or log-replication call
+// (Raft paper §5.2, §5.3). Day 5 scope is heartbeats only — Entries is
+// always empty until Day 7, so the prevLogIndex/prevLogTerm consistency
+// check that real replication needs lands Day 10; for now, any
+// term-valid call just succeeds.
+//
+// A term-valid AppendEntries (args.Term >= currentTerm) is proof a
+// legitimate leader exists for that term: a Candidate steps down (§5.2,
+// "Rules for Servers" — Candidates, bullet 3), and this node resets its
+// election timer either way. becomeFollowerLocked only resets votedFor
+// when the term actually advances, so calling it even when
+// args.Term == currentTerm is safe — it won't discard an in-progress
+// term's vote.
 func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if args.Term < r.currentTerm {
+		reply.Term = r.currentTerm
+		reply.Success = false
+		return nil
+	}
+
+	r.becomeFollowerLocked(args.Term)
 	reply.Term = r.currentTerm
-	reply.Success = false
+	reply.Success = true
+	r.ResetElectionTimer()
 	return nil
 }

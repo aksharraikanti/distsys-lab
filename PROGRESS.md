@@ -1,8 +1,8 @@
 # Progress
 
 Current stage: **01-raft**
-Current day: **Day 5 — Heartbeats** (next up)
-Status: Day 4 complete
+Current day: **Day 6 — Election edge cases** (next up)
+Status: Day 5 complete
 
 ## Log
 
@@ -22,3 +22,9 @@ Status: Day 4 complete
   in `startElection`, and an end-to-end test proving 3 nodes converge on exactly
   one leader via their real election timers. Ran long as predicted — the
   concurrency of the election, not the RPC rules themselves, was the hard part.
+- 2026-09-09 — Day 5 (Heartbeats) complete: real AppendEntries logic (mirrors
+  Day 4's RequestVote pattern), leader-side periodic heartbeat loop
+  (`RunHeartbeats`), and a caught bug — `HeartbeatInterval` had equaled
+  `ElectionTimeoutMin` since Day 1, dropped to 2ms so heartbeats reliably beat
+  the election-timeout floor. `TestHeartbeatsKeepLeaderStable` proves leadership
+  now survives many election-timeout cycles once heartbeats are wired up.
