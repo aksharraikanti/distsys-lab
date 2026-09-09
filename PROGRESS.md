@@ -1,8 +1,8 @@
 # Progress
 
 Current stage: **01-raft**
-Current day: **Day 6 — Election edge cases** (next up)
-Status: Day 5 complete
+Current day: **Day 7 — Log entries** (next up)
+Status: Day 6 complete
 
 ## Log
 
@@ -28,3 +28,10 @@ Status: Day 5 complete
   `ElectionTimeoutMin` since Day 1, dropped to 2ms so heartbeats reliably beat
   the election-timeout floor. `TestHeartbeatsKeepLeaderStable` proves leadership
   now survives many election-timeout cycles once heartbeats are wired up.
+- 2026-09-09 — Day 6 (Election edge cases) complete: no new production code —
+  every edge case (split vote, stale-leader rejection, term monotonicity, node
+  restart) was already correctly handled by Days 2-5's primitives. Added tests
+  proving each one, including a genuinely new coverage gap found along the way
+  (the leader-side step-down branch in `sendHeartbeats` had never been
+  exercised). Node restart is explicitly scoped to liveness only — the real
+  safety gap (a restarted node has no memory of its prior vote) is Day 11's job.

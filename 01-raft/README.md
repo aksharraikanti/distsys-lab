@@ -134,6 +134,34 @@ this.)_
   through many election-timeout cycles, which is the whole point of heartbeats
   existing at all.
 
+### Day 6 — Election edge cases
+- No new production code today — every edge case in this day turned out to
+  already be correctly handled by Days 2-5's logic. The day's actual job was
+  proving that with tests, not implementing anything new. That's worth
+  noticing in itself: getting the *primitives* right early (one-vote-per-term,
+  "step down on term >= mine," term-never-decreases) is what makes edge cases
+  fall out for free instead of needing special-cased handling later.
+- The split-vote test needed the swing voters' votes *pre-committed by directly
+  poking `votedFor`* rather than by racing real concurrent `startElection` calls
+  against each other — real concurrency would make which candidate a given
+  voter favors nondeterministic, and the whole point of this test is proving a
+  *specific, guaranteed* split (2-2 in a 4-node cluster) doesn't falsely elect
+  anyone. Forcing the scenario deterministically is what makes it a real test
+  instead of a test that only sometimes exercises the code path it claims to.
+- `TestStaleLeaderStepsDownOnHigherTermReply` found a gap in test coverage, not
+  a gap in the code: `sendHeartbeats`'s "step down if a reply reveals a higher
+  term" branch existed since Day 5 but nothing had actually exercised it — Day
+  5's tests only covered the follower side (rejecting a stale leader), never
+  the leader side (a stale leader discovering it's stale). Same logic, opposite
+  direction; worth remembering that "the handler is tested" and "every branch
+  that handler participates in is tested" aren't the same claim.
+- Node restarts are deliberately scoped to *liveness*, not *safety*, and the
+  test's doc comment says so explicitly: a restarted node has no memory of its
+  prior term or vote (no persistence yet), so in principle it could vote for a
+  candidate it "should" remember refusing. That's a real, currently-open safety
+  gap — closing it for real is Day 11's entire job, not something to
+  half-solve here with an ad hoc workaround.
+
 ### Day 2 — Server states
 -
 
