@@ -64,6 +64,7 @@ func (r *Raft) replicateToPeer(peer int) {
 	if next <= len(r.log) {
 		entries = append([]LogEntry(nil), r.log[next-1:]...)
 	}
+	leaderCommit := r.commitIndex
 	r.mu.Unlock()
 
 	args := &AppendEntriesArgs{
@@ -72,7 +73,7 @@ func (r *Raft) replicateToPeer(peer int) {
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  prevLogTerm,
 		Entries:      entries,
-		LeaderCommit: 0, // commit tracking lands Day 9
+		LeaderCommit: leaderCommit,
 	}
 
 	var reply AppendEntriesReply
@@ -97,6 +98,7 @@ func (r *Raft) replicateToPeer(peer int) {
 			r.matchIndex[peer] = newMatch
 		}
 		r.nextIndex[peer] = newMatch + 1
+		r.advanceCommitIndexLocked()
 		return
 	}
 

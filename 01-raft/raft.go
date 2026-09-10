@@ -62,10 +62,17 @@ type Raft struct {
 	//
 	// matchIndex[p]: the highest log index this leader has *confirmed*
 	// (via a successful reply) is replicated on peer p. Starts at 0 — "no
-	// confirmation yet." Day 9's commit rule will use this to know when
-	// an entry has reached a majority.
+	// confirmation yet." advanceCommitIndexLocked (commit.go) uses this to
+	// know when an entry has reached a majority.
 	nextIndex  map[int]int
 	matchIndex map[int]int
+
+	// ApplyCh delivers each committed entry, in order, exactly once, as
+	// commitIndex advances past lastApplied — see RunApplyLoop (apply.go).
+	// Every node (not just the leader) applies from its own log/commitIndex,
+	// which is what makes this the channel a state machine on ANY node —
+	// leader or follower — reads from.
+	ApplyCh chan ApplyMsg
 
 	// Election-timer machinery (Day 3, election_timer.go). resetElectionTimer
 	// is buffered so ResetElectionTimer never blocks its caller — a dropped
@@ -93,6 +100,8 @@ func NewRaft(id int, peers []int, transport Transport) *Raft {
 		transport: transport,
 		state:     Follower,
 		votedFor:  -1,
+
+		ApplyCh: make(chan ApplyMsg, 64),
 
 		resetElectionTimer: make(chan struct{}, 1),
 		stopCh:             make(chan struct{}),
@@ -171,6 +180,19 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 
 	if len(args.Entries) > 0 && args.PrevLogIndex <= len(r.log) {
 		r.log = append(r.log[:args.PrevLogIndex], args.Entries...)
+	}
+
+	// Day 9: adopt the leader's commit progress. Capped at this node's own
+	// last log index — never trust LeaderCommit past what was actually
+	// just appended locally, since this node can't apply an entry it
+	// doesn't have yet (Raft paper §5.3).
+	if args.LeaderCommit > r.commitIndex {
+		lastNewIndex, _ := r.lastLogInfoLocked()
+		if args.LeaderCommit < lastNewIndex {
+			r.commitIndex = args.LeaderCommit
+		} else {
+			r.commitIndex = lastNewIndex
+		}
 	}
 
 	reply.Success = true

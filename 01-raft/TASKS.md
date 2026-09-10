@@ -34,7 +34,7 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
       leader appends to its own log on a client request.
 - [x] **Day 8 — Log replication.** Leader replicates entries to followers, tracks
       `matchIndex`/`nextIndex`, retries on failure.
-- [ ] **Day 9 — Commit rule.** Leader advances `commitIndex` once a majority has
+- [x] **Day 9 — Commit rule.** Leader advances `commitIndex` once a majority has
       replicated an entry; followers apply committed entries to a state machine.
 - [ ] **Day 10 — Log consistency check.** Implement the `AppendEntries` consistency
       check (prevLogIndex/prevLogTerm) so followers reject/truncate divergent logs.
