@@ -123,10 +123,7 @@ func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error
 }
 
 // AppendEntries handles an incoming heartbeat or log-replication call
-// (Raft paper §5.2, §5.3). Day 5 scope is heartbeats only — Entries is
-// always empty until Day 7, so the prevLogIndex/prevLogTerm consistency
-// check that real replication needs lands Day 10; for now, any
-// term-valid call just succeeds.
+// (Raft paper §5.2, §5.3).
 //
 // A term-valid AppendEntries (args.Term >= currentTerm) is proof a
 // legitimate leader exists for that term: a Candidate steps down (§5.2,
@@ -135,6 +132,15 @@ func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error
 // when the term actually advances, so calling it even when
 // args.Term == currentTerm is safe — it won't discard an in-progress
 // term's vote.
+//
+// Day 7 scope: any entries carried in args.Entries are appended starting
+// right after args.PrevLogIndex, trusting the leader's PrevLogIndex
+// without verifying it against this node's own log — rejecting (or
+// truncating) on an actual mismatch is Day 10's "log consistency check."
+// Nothing yet calls this with non-empty entries (sendHeartbeats always
+// sends empty ones — real leader-driven replication is Day 8), so this is
+// exercised directly by tests for now, proving the capability ahead of
+// the day that wires a caller up to it.
 func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -147,6 +153,11 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 
 	r.becomeFollowerLocked(args.Term)
 	reply.Term = r.currentTerm
+
+	if len(args.Entries) > 0 && args.PrevLogIndex <= len(r.log) {
+		r.log = append(r.log[:args.PrevLogIndex], args.Entries...)
+	}
+
 	reply.Success = true
 	r.ResetElectionTimer()
 	return nil
