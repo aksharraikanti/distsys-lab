@@ -50,6 +50,23 @@ type Raft struct {
 	commitIndex int
 	lastApplied int
 
+	// Leader-only replication state (Raft paper Figure 2, "reinitialized
+	// after election" — see becomeLeaderLocked). Both are keyed by peer
+	// id, not by cluster position, so a peer's entry stays meaningful
+	// even as other peers come and go.
+	//
+	// nextIndex[p]: the next log index this leader will try sending to
+	// peer p. Starts optimistically at (this leader's last log index + 1)
+	// — "assume p is fully caught up" — and gets walked backward by
+	// replicateToPeer on a rejection.
+	//
+	// matchIndex[p]: the highest log index this leader has *confirmed*
+	// (via a successful reply) is replicated on peer p. Starts at 0 — "no
+	// confirmation yet." Day 9's commit rule will use this to know when
+	// an entry has reached a majority.
+	nextIndex  map[int]int
+	matchIndex map[int]int
+
 	// Election-timer machinery (Day 3, election_timer.go). resetElectionTimer
 	// is buffered so ResetElectionTimer never blocks its caller — a dropped
 	// reset just means the current countdown runs a little longer, which is
@@ -133,14 +150,12 @@ func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error
 // args.Term == currentTerm is safe — it won't discard an in-progress
 // term's vote.
 //
-// Day 7 scope: any entries carried in args.Entries are appended starting
-// right after args.PrevLogIndex, trusting the leader's PrevLogIndex
-// without verifying it against this node's own log — rejecting (or
-// truncating) on an actual mismatch is Day 10's "log consistency check."
-// Nothing yet calls this with non-empty entries (sendHeartbeats always
-// sends empty ones — real leader-driven replication is Day 8), so this is
-// exercised directly by tests for now, proving the capability ahead of
-// the day that wires a caller up to it.
+// Any entries carried in args.Entries (Day 7) are appended starting right
+// after args.PrevLogIndex, trusting the leader's PrevLogIndex without
+// verifying it against this node's own log — rejecting (or truncating)
+// on an actual mismatch is Day 10's "log consistency check." Day 8's
+// replicateToPeer is the real caller now, sending exactly the entries a
+// peer is missing per the leader's nextIndex bookkeeping.
 func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

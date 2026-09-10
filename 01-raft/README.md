@@ -189,6 +189,37 @@ this.)_
   `PrevLogIndex: 0` on an empty log) wouldn't catch a bug in the "throw away
   anything after PrevLogIndex" half of that one line.
 
+### Day 8 — Log replication
+- `sendHeartbeats` (Day 5) became `replicate`/`replicateToPeer` today — not a
+  new, separate mechanism sitting next to heartbeats, but the same periodic
+  call site now carrying real payload. A heartbeat was never really a distinct
+  concept from replication; it's just what replication looks like when
+  `nextIndex[peer]` says there's nothing new to send. Renaming the function
+  instead of adding a second one next to it is what keeps that true in the code,
+  not just in my head.
+- `nextIndex`/`matchIndex` reinitializing inside `becomeLeaderLocked` (not
+  somewhere else, not lazily on first use) matters because the Raft paper is
+  specific about this: they're reinitialized *fresh, every time a node becomes
+  leader* — stale values from a previous stint as leader (in an earlier term)
+  must never leak into a new one. Putting the reset at the single choke point
+  every path to leadership already goes through (`becomeLeaderLocked`) means
+  there's no second call site that could forget to do it.
+- The "retries on failure" half of this day's requirement is real code with
+  zero live callers right now — Day 10's consistency check doesn't exist yet,
+  so a term-valid `AppendEntries` can never actually return `Success: false`.
+  `TestReplicateToPeerBacksOffNextIndexOnFailure` proves the backoff logic
+  works by injecting a fake handler that always rejects, rather than waiting
+  for Day 10 to make the path reachable for real. Same pattern as Day 7's
+  append logic being proven ahead of its caller — proving a capability doesn't
+  have to wait for the day that makes it load-bearing.
+- `TestReplicateOnlySendsNewEntriesOnSubsequentRounds` needed a custom
+  `recordingTransport` wrapper (embeds `*FakeTransport`, overrides only
+  `CallAppendEntries`) because checking a follower's *final* log state can't
+  distinguish "only sent what was missing" from "resent everything and it just
+  happened to converge to the same result." Proving the *efficiency* claim —
+  not just the *correctness* claim — required inspecting what actually went
+  out on the wire.
+
 ### Day 2 — Server states
 -
 

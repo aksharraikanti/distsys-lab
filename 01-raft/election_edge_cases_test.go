@@ -7,7 +7,7 @@ import "testing"
 // must never move term or votedFor backwards. In practice none of this
 // package's own call sites ever invoke it that way — RequestVote and
 // AppendEntries both check args.Term >= currentTerm before calling
-// becomeFollowerLocked, and startElection/sendHeartbeats both check
+// becomeFollowerLocked, and startElection/replicateToPeer both check
 // reply.Term > currentTerm — but this is exactly the kind of invariant
 // worth guarding at the primitive itself, since a single future call site
 // that skips the check would otherwise silently corrupt state.
@@ -136,9 +136,9 @@ func TestStaleLeaderStepsDownOnHigherTermReply(t *testing.T) {
 		nodes[id].mu.Unlock()
 	}
 
-	// node0, still believing it's the term-1 leader, sends a heartbeat
+	// node0, still believing it's the term-1 leader, sends a replication
 	// round — exactly what a real stale leader does once a partition heals.
-	nodes[0].sendHeartbeats()
+	nodes[0].replicate()
 
 	if got := nodes[0].State(); got != Follower {
 		t.Fatalf("stale leader state after replies reveal a higher term = %s, want Follower", got)
