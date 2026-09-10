@@ -30,7 +30,7 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
       heartbeats; followers reset their election timer on receipt.
 - [x] **Day 6 — Election edge cases.** Split votes, term numbers, stale-leader
       rejection. Test with simulated node restarts.
-- [ ] **Day 7 — Log entries.** Extend `AppendEntries` to carry real log entries;
+- [x] **Day 7 — Log entries.** Extend `AppendEntries` to carry real log entries;
       leader appends to its own log on a client request.
 - [ ] **Day 8 — Log replication.** Leader replicates entries to followers, tracks
       `matchIndex`/`nextIndex`, retries on failure.

@@ -1,8 +1,8 @@
 # Progress
 
 Current stage: **01-raft**
-Current day: **Day 7 — Log entries** (next up)
-Status: Day 6 complete
+Current day: **Day 8 — Log replication** (next up)
+Status: Day 7 complete
 
 ## Log
 
@@ -35,3 +35,8 @@ Status: Day 6 complete
   (the leader-side step-down branch in `sendHeartbeats` had never been
   exercised). Node restart is explicitly scoped to liveness only — the real
   safety gap (a restarted node has no memory of its prior vote) is Day 11's job.
+- 2026-09-10 — Day 7 (Log entries) complete: `Propose` (leader-side, appends a
+  client command to the leader's own log only) and real `AppendEntries` append
+  logic (follower-side, trusts PrevLogIndex without verifying it — that
+  verification is explicitly Day 10's job). Nothing calls AppendEntries with
+  real entries yet; that wiring is Day 8's.

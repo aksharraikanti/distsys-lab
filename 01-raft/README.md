@@ -162,6 +162,33 @@ this.)_
   gap — closing it for real is Day 11's entire job, not something to
   half-solve here with an ad hoc workaround.
 
+### Day 7 — Log entries
+- `Propose` only touches the *leader's own* log — nothing about replicating the
+  entry to followers or knowing when it's safely committed lives here. That
+  split matters: "a client asked for this" (Day 7), "the cluster has a copy of
+  it" (Day 8), and "it's safe to apply" (Day 9) are three genuinely different
+  guarantees, and conflating them into one method would make it impossible to
+  reason about what's actually been promised at any given point.
+- `AppendEntries`'s new append logic (`r.log = append(r.log[:args.PrevLogIndex], args.Entries...)`)
+  is deliberately naive — it *trusts* PrevLogIndex instead of verifying the
+  follower's log actually agrees with the leader at that position first. That's
+  not an oversight; it's explicitly Day 10's job ("log consistency check"),
+  named as such in the Raft paper as a separate concern from "how do entries
+  get appended at all." Building it now would mean re-deriving Day 10's logic
+  early, out of order, from a position with less context than Day 8 and 9 will
+  provide.
+- Nothing currently calls `AppendEntries` with real (non-empty) entries —
+  `sendHeartbeats` still only ever sends empty ones. That makes today's new
+  append logic dead code from the running system's point of view, exercised
+  only by direct test calls. That's fine and expected for a day whose job is
+  "prove the capability exists," not "wire it into the leader's send loop" —
+  that wiring is exactly what Day 8 adds.
+- The overwrite test (`TestAppendEntriesOverwritesFromPrevLogIndex`) is the one
+  that actually exercises `r.log[:args.PrevLogIndex]`'s truncation behavior —
+  the append-only test alone (`TestAppendEntriesAppendsRealEntries`, using
+  `PrevLogIndex: 0` on an empty log) wouldn't catch a bug in the "throw away
+  anything after PrevLogIndex" half of that one line.
+
 ### Day 2 — Server states
 -
 
