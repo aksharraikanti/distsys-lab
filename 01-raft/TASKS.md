@@ -32,7 +32,7 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
       rejection. Test with simulated node restarts.
 - [x] **Day 7 — Log entries.** Extend `AppendEntries` to carry real log entries;
       leader appends to its own log on a client request.
-- [ ] **Day 8 — Log replication.** Leader replicates entries to followers, tracks
+- [x] **Day 8 — Log replication.** Leader replicates entries to followers, tracks
       `matchIndex`/`nextIndex`, retries on failure.
 - [ ] **Day 9 — Commit rule.** Leader advances `commitIndex` once a majority has
       replicated an entry; followers apply committed entries to a state machine.

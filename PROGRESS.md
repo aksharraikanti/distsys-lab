@@ -1,8 +1,8 @@
 # Progress
 
 Current stage: **01-raft**
-Current day: **Day 8 — Log replication** (next up)
-Status: Day 7 complete
+Current day: **Day 9 — Commit rule** (next up)
+Status: Day 8 complete
 
 ## Log
 
@@ -40,3 +40,11 @@ Status: Day 7 complete
   logic (follower-side, trusts PrevLogIndex without verifying it — that
   verification is explicitly Day 10's job). Nothing calls AppendEntries with
   real entries yet; that wiring is Day 8's.
+- 2026-09-10 — Day 8 (Log replication) complete: `nextIndex`/`matchIndex`
+  reinitialized on every `becomeLeaderLocked`, `sendHeartbeats` renamed to
+  `replicate`/`replicateToPeer` (same call site, now carrying real payload
+  instead of always-empty entries), and nextIndex-based incremental sending
+  proven via a recording transport (a follower's second round only carries
+  what's new, not the whole log again). "Retries on failure" is proven with an
+  injected always-rejecting handler, since Day 10's consistency check doesn't
+  exist yet to make real rejections reachable.

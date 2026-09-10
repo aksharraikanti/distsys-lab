@@ -103,5 +103,16 @@ func (r *Raft) becomeLeaderLocked() error {
 		return fmt.Errorf("raft: invalid transition %s -> Leader (must come from Candidate)", r.state)
 	}
 	r.state = Leader
+
+	// Reinitialize replication state fresh for this term (Raft paper
+	// Figure 2) — any nextIndex/matchIndex values from a previous stint
+	// as leader are stale and must not carry over.
+	lastIndex, _ := r.lastLogInfoLocked()
+	r.nextIndex = make(map[int]int, len(r.peers))
+	r.matchIndex = make(map[int]int, len(r.peers))
+	for _, peer := range r.peers {
+		r.nextIndex[peer] = lastIndex + 1
+		r.matchIndex[peer] = 0
+	}
 	return nil
 }
