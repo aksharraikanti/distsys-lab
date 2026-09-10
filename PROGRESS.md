@@ -1,8 +1,8 @@
 # Progress
 
 Current stage: **01-raft**
-Current day: **Day 9 — Commit rule** (next up)
-Status: Day 8 complete
+Current day: **Day 10 — Log consistency check** (next up)
+Status: Day 9 complete
 
 ## Log
 
@@ -48,3 +48,12 @@ Status: Day 8 complete
   what's new, not the whole log again). "Retries on failure" is proven with an
   injected always-rejecting handler, since Day 10's consistency check doesn't
   exist yet to make real rejections reachable.
+- 2026-09-10 — Day 9 (Commit rule) complete: `advanceCommitIndexLocked`
+  implements the Figure 8 safety fix (never commit an older-term entry
+  directly, even with a majority — only a later current-term entry reaching a
+  majority makes everything before it safe). Follower-side commitIndex now
+  tracks LeaderCommit (capped at its own last log index). `RunApplyLoop` runs
+  identically on every node — leader and followers alike — delivering
+  committed entries on `ApplyCh` in order. `TestEndToEndProposeCommitApply`
+  proves the full pipeline: Propose -> replicate -> majority -> commit ->
+  LeaderCommit -> apply, landing the same entry on all 3 nodes.

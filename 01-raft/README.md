@@ -220,6 +220,39 @@ this.)_
   not just the *correctness* claim — required inspecting what actually went
   out on the wire.
 
+### Day 9 — Commit rule
+- The Figure 8 restriction — never commit an entry directly just because a
+  majority holds it, unless that entry is from the LEADER'S CURRENT TERM — is
+  the single most important safety rule in this entire stage, and it's easy to
+  miss entirely if you implement "majority replicated = safe to commit" as the
+  whole rule (it reads as obviously sufficient until you trace through the
+  paper's actual counterexample). `TestAdvanceCommitIndexRequiresCurrentTermEntry`
+  exists specifically because this is the one place a plausible-looking
+  simplification is a real correctness bug, not a style choice.
+- `advanceCommitIndexLocked` gets called from two places — `replicateToPeer`'s
+  success path (the normal multi-node case) AND `Propose` itself (needed only
+  for the single-node/zero-peer edge case, where there's no peer reply to ever
+  trigger the first call site). Missing the second call site wouldn't show up
+  in any 3-node test; it would only surface as "a single-node cluster never
+  commits anything," which is exactly the kind of gap that's invisible until
+  someone actually tries the degenerate case.
+- `RunApplyLoop` runs identically on the leader AND every follower — there's no
+  special "leader applies, followers just store" split. Each node watches its
+  *own* commitIndex (kept in sync independently: the leader's advances via
+  matchIndex majorities, a follower's via LeaderCommit) and applies from its
+  own log. That symmetry is what makes `ApplyCh` meaningful regardless of which
+  node a future state machine attaches to — `TestEndToEndProposeCommitApply`
+  proves this directly by reading the exact same entry off all three nodes'
+  channels.
+- `applyPending`'s bounds guard (`nextApplied > len(r.log)`, skip rather than
+  panic) is deliberately defensive against a scenario that *shouldn't* be
+  reachable given how commitIndex is set today — but "shouldn't be reachable
+  given the current code" and "is actually guaranteed never to happen" are
+  different claims until Day 10's log consistency check exists to make the
+  first one true for real. Failing safe here costs one `if`, and the
+  alternative (an index-out-of-range panic taking down a node) is a much worse
+  failure mode than silently deferring an apply by one tick.
+
 ### Day 2 — Server states
 -
 
