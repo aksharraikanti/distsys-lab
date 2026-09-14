@@ -1,9 +1,9 @@
 # Progress
 
 Current stage: **02-kv-store**
-Current day: **Day 2 — Client-facing RPC handlers** (next up)
+Current day: **Day 3 — Duplicate request detection** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
-Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Day 1 complete.
+Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-2 complete.
 
 ## Log
 
@@ -102,3 +102,18 @@ Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Day 1 complete.
   `Get` is explicitly NOT linearizable yet (a direct local read, no Raft
   routing, no leader check) — that's flagged in its own doc comment for a
   later day to address.
+- 2026-09-14 — Day 2 (Client-facing RPC handlers) complete: real `Get`/
+  `PutAppend` RPC handlers, and a per-index notify-channel mechanism
+  (`notifyChans map[int]chan Op`) that lets `PutAppend` learn exactly which
+  command landed at the log index it proposed — not just that commitIndex
+  advanced, since a later leader's entry can legitimately supersede this
+  node's still-uncommitted one at the same index. `commitTimeout` bounds how
+  long a handler waits before giving up.
+  `TestPutAppendDetectsSupersededProposal` proves the supersession case
+  end-to-end with real election/partition machinery; writing it surfaced a
+  genuine test bug (both nodes starting at term 0 meant a single
+  `BecomeCandidate()` call only tied terms instead of exceeding them — fixed
+  with two calls on the challenger). Stress-testing also surfaced a
+  ~13%-flaky pre-existing Stage 1 test (`TestHeartbeatsKeepLeaderStable`)
+  under real CPU contention from both packages' test suites running
+  together — flagged as a separate follow-up task, not folded into this PR.

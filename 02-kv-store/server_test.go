@@ -63,7 +63,7 @@ func TestApplyLoopAppliesPutAndAppend(t *testing.T) {
 	}
 
 	waitFor(t, time.Second, func() bool {
-		v, ok := kv.Get("x")
+		v, ok := kv.get("x")
 		return ok && v == "1-more"
 	})
 }
@@ -93,7 +93,7 @@ func TestApplyLoopPreservesCommitOrder(t *testing.T) {
 	}
 
 	waitFor(t, time.Second, func() bool {
-		v, ok := kv.Get("seq")
+		v, ok := kv.get("seq")
 		return ok && v == "abcd"
 	})
 }
@@ -106,7 +106,7 @@ func TestGetReturnsFalseForMissingKey(t *testing.T) {
 	defer rf.StopElectionTimer()
 
 	kv := NewKVServer(rf)
-	if v, ok := kv.Get("nope"); ok || v != "" {
+	if v, ok := kv.get("nope"); ok || v != "" {
 		t.Fatalf("Get(missing key) = (%q, %v), want (\"\", false)", v, ok)
 	}
 }
@@ -161,7 +161,7 @@ func TestKVStoreConvergesAcrossCluster(t *testing.T) {
 	for _, id := range ids {
 		id := id
 		waitFor(t, 20*raft.ElectionTimeoutMax, func() bool {
-			v, ok := kvs[id].Get("x")
+			v, ok := kvs[id].get("x")
 			return ok && v == "1-more"
 		})
 	}
