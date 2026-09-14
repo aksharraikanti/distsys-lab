@@ -1,8 +1,8 @@
 # Progress
 
 Current stage: **01-raft**
-Current day: **Day 10 — Log consistency check** (next up)
-Status: Day 9 complete
+Current day: **Day 11(-13) — Persistence** (next up)
+Status: Day 10 complete
 
 ## Log
 
@@ -57,3 +57,12 @@ Status: Day 9 complete
   committed entries on `ApplyCh` in order. `TestEndToEndProposeCommitApply`
   proves the full pipeline: Propose -> replicate -> majority -> commit ->
   LeaderCommit -> apply, landing the same entry on all 3 nodes.
+- 2026-09-13 — Day 10 (Log consistency check) complete: real PrevLogIndex/
+  PrevLogTerm verification in AppendEntries, rejecting (rather than blindly
+  trusting) when a follower's log doesn't actually agree with the leader at
+  that point. This is the day three earlier "not yet, later" notes converged
+  on: Day 7's naive trust-the-caller append, Day 8's previously-unreachable
+  rejection/backoff path, and the defensive bounds guard from Day 9's apply
+  loop. `TestReplicateConvergesADivergedFollower` proves a genuinely diverged
+  follower (not just behind, but holding a conflicting entry) gets corrected
+  via real rejection-and-backoff, not a lucky one-round overwrite.

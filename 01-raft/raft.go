@@ -159,12 +159,20 @@ func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error
 // args.Term == currentTerm is safe — it won't discard an in-progress
 // term's vote.
 //
-// Any entries carried in args.Entries (Day 7) are appended starting right
-// after args.PrevLogIndex, trusting the leader's PrevLogIndex without
-// verifying it against this node's own log — rejecting (or truncating)
-// on an actual mismatch is Day 10's "log consistency check." Day 8's
-// replicateToPeer is the real caller now, sending exactly the entries a
-// peer is missing per the leader's nextIndex bookkeeping.
+// Day 10's log consistency check (§5.3) runs next: this node must
+// already have an entry at PrevLogIndex whose term matches PrevLogTerm,
+// or the leader's entries don't causally attach to anything real in this
+// node's log and must be refused. PrevLogIndex == 0 always passes — it
+// means "start from the very beginning," which is trivially consistent
+// with any log. Once the check passes, entries are appended starting
+// right after PrevLogIndex — any existing entry there is a stale/
+// diverged leftover and gets overwritten along with everything after it
+// (§5.3's "delete the existing entry and all that follow it"). Day 8's
+// replicateToPeer is the caller, sending exactly the entries a peer is
+// missing per the leader's nextIndex bookkeeping, and backing nextIndex
+// off by one whenever this check rejects — that backoff-and-retry path
+// only became reachable for real once this check existed to produce a
+// genuine rejection.
 func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -178,7 +186,19 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 	r.becomeFollowerLocked(args.Term)
 	reply.Term = r.currentTerm
 
-	if len(args.Entries) > 0 && args.PrevLogIndex <= len(r.log) {
+	if args.PrevLogIndex > 0 {
+		if args.PrevLogIndex > len(r.log) || r.log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
+			reply.Success = false
+			// Still a legitimate leader for this term — just missing an
+			// entry this node needs first. Reset the timer so this
+			// rejection doesn't also trigger a spurious election; the
+			// leader will retry with a lower PrevLogIndex.
+			r.ResetElectionTimer()
+			return nil
+		}
+	}
+
+	if len(args.Entries) > 0 {
 		r.log = append(r.log[:args.PrevLogIndex], args.Entries...)
 	}
 

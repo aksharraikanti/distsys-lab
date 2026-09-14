@@ -118,8 +118,9 @@ func TestFollowerCommitIndexFollowsLeaderCommit(t *testing.T) {
 	}
 
 	// LeaderCommit beyond what this node actually has must be capped, not
-	// taken at face value.
-	args2 := &AppendEntriesArgs{Term: 1, LeaderID: 1, PrevLogIndex: 3, LeaderCommit: 10}
+	// taken at face value. PrevLogTerm: 1 matches what's actually at index
+	// 3 (Day 10's consistency check would otherwise reject this).
+	args2 := &AppendEntriesArgs{Term: 1, LeaderID: 1, PrevLogIndex: 3, PrevLogTerm: 1, LeaderCommit: 10}
 	var reply2 AppendEntriesReply
 	if err := r.AppendEntries(args2, &reply2); err != nil {
 		t.Fatalf("AppendEntries (heartbeat): %v", err)
