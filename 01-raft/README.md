@@ -330,6 +330,45 @@ this.)_
   safety gap, scoped out on purpose because persistence didn't exist yet. This
   test is that exact scenario, proven closed.
 
+### Day 12(-13) — Fault injection tests
+- Ran in one day, not two — the eleven days before this one had already done
+  the actual hard work. Every fault this day injects (a crashed leader, a
+  partitioned network, a restarted follower) is really just Days 2-11's
+  existing mechanisms — term comparison, the majority-commit rule, the
+  consistency check, persistence — being exercised in combination instead of
+  in isolation. Nothing new had to be invented; the only genuinely new code is
+  `FakeTransport.Partition`/`Unregister`, the fault-injection *capability*
+  itself.
+- `FakeTransport.Partition` needed no changes to the `Transport` interface at
+  all — it infers "who's calling" from `args.CandidateID`/`args.LeaderID`,
+  fields that were already on the RPC structs since Day 1 for entirely
+  different reasons. This is a small, satisfying case of upstream design
+  paying for itself much later: nobody was thinking about partition testing
+  when those fields were added.
+- `FakeTransport.Unregister` exists as a distinct thing from just calling
+  `StopElectionTimer()` on a node, and the distinction matters: a node that
+  only stopped INITIATING calls would still correctly ANSWER any RPC sent to
+  it, which is not what a crashed process does. Simulating a crash accurately
+  means making the node unreachable, not just quiet.
+- The partition test's most important single assertion isn't "the majority
+  elects a new leader" (the easy, expected part) — it's
+  `nodes[leaderID].CommitIndex() != 1+something`, proving the ISOLATED old
+  leader's own `Propose` call, which still LOCALLY succeeds (it has no way to
+  know it's cut off), never actually commits. `Propose` succeeding and an
+  entry committing are different claims, and this is the test that would
+  catch it if that distinction ever quietly broke.
+- `assertLogsConsistent` deliberately only compares logs through the LOWEST
+  commitIndex across the cluster, not the full log. Divergence beyond the
+  committed prefix (like the partition test's abandoned "stuck-in-minority"
+  entry, silently overwritten once the old leader rejoins as a follower) is
+  expected and fine — only the committed prefix is required to be identical
+  everywhere. Comparing full logs would have made this helper fail on
+  perfectly correct behavior.
+- Stress-ran the partition test 15x with `-count=15` (on top of the standard
+  5x for the other two) specifically because it's the one combining the most
+  concurrency and timing — worth the extra confidence given how much of this
+  stage's actual safety story routes through this one test.
+
 ### Day 2 — Server states
 -
 

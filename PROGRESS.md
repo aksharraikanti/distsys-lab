@@ -1,8 +1,11 @@
 # Progress
 
-Current stage: **01-raft**
-Current day: **Day 12(-13) — Fault injection tests** (next up)
-Status: Day 11 complete
+Current stage: **01-raft — COMPLETE**
+Next up: **Stage 2 — Fault-tolerant KV store on Raft** (not yet scoped into
+day-by-day tasks — following the root README's pattern, Stage 2 gets its own
+`TASKS.md` breakdown once work on it actually starts, rather than front-loaded
+now)
+Status: Stage 1 (Raft consensus from scratch), all 12 days complete
 
 ## Log
 
@@ -75,3 +78,18 @@ Status: Day 11 complete
   is untouched, so the full existing suite (Days 1-10) passed unchanged.
   `TestGrantedVoteSurvivesRestart` closes the exact safety gap Day 6's
   `TestNodeRestartRejoinsCluster` explicitly flagged as open.
+- 2026-09-14 — Day 12(-13) (Fault injection tests) complete, and with it,
+  **Stage 1 is done**. Ran in one day, not two, because Days 2-11 had already
+  built every mechanism this day exercises in combination — the only new
+  code was `FakeTransport.Partition`/`Unregister`, the fault-injection
+  capability itself, inferring "who's calling" from RPC fields (CandidateID/
+  LeaderID) that already existed since Day 1 for unrelated reasons. Three
+  integration tests cover every fault TASKS.md named: a crashed leader (new
+  leader elected, cluster keeps committing), a network partition (5-node
+  cluster splits 3-2, majority elects its own leader and commits, the
+  isolated old leader's `Propose` calls succeed locally but never commit,
+  healing converges everyone), and a follower restart mid-operation (with
+  real persistence — replication catches it up on what happened while it was
+  down, since persistence alone only recovers pre-crash state).
+  `assertLogsConsistent` checks the Log Matching Property directly: every
+  node's log must agree through the lowest commitIndex anyone has reached.
