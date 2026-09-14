@@ -40,6 +40,37 @@ _(fill this in as you learn — one section per day, in your own words.)_
   needs that warning readily visible, not buried in a TASKS.md line — a
   reader who only opens `server.go` should still learn the limitation.
 
+### Day 2 — Client-facing RPC handlers
+- The per-index notify-channel pattern (`notifyChans map[int]chan Op`,
+  buffered(1)) exists to answer a question that "just wait for commitIndex to
+  advance" can't: WHICH command actually landed at the index this handler
+  cares about. Those are different questions — a later leader's entry can
+  legitimately occupy the same index this node proposed to. Comparing the
+  received `Op` against the proposed one (`applied != op`) is what turns
+  "something committed at index N" into "MY thing committed at index N."
+  Day 3's client-id/sequence-number work will make this comparison far more
+  precise than plain struct equality, but the mechanism — wait on this index,
+  compare what shows up — doesn't change.
+- Writing `TestPutAppendDetectsSupersededProposal` surfaced a real bug in the
+  TEST, not the production code, and it's worth remembering the shape of it:
+  both nodes start at term 0, so giving node1 a single `BecomeCandidate()`
+  call only TIES node0's term (both land on 1) rather than exceeding it. Which
+  node's heartbeat happened to reach the other first — a coin flip — decided
+  who superseded whom, so the test passed roughly half the time for the wrong
+  reason. The fix was two `BecomeCandidate()` calls on node1 to deterministically
+  reach term 2. General lesson: when a test needs a "definitely higher term,"
+  derive it from the OTHER side's actual value, don't assume a fixed number of
+  transitions gets you there — assuming this caused about 20 minutes of
+  confused debugging before the actual bug (a race in the TEST, not the
+  production code) became clear.
+- Stress-testing this day surfaced something outside its own scope entirely:
+  running `go test ./...` (both packages) under real CPU contention exposed a
+  ~13% flaky failure in Stage 1's `TestHeartbeatsKeepLeaderStable` — a
+  pre-existing test-timing-margin issue (unrelated to anything Day 2 touched)
+  that a growing test suite now surfaces more readily. Flagged as a separate
+  follow-up rather than folded into this PR — it's not Day 2's bug to fix, and
+  bundling an unrelated Stage 1 fix into a Stage 2 PR would muddy both.
+
 _(continue per day)_
 
 ## Reference material

@@ -13,7 +13,7 @@ tested — "read about it" isn't done.
       duplicate request detection (Day 3). `Get` is a direct, non-Raft-routed
       local read — proving the apply loop is correct is this day's only job;
       making reads linearizable is explicitly later.
-- [ ] **Day 2 — Client-facing RPC handlers.** `Get`/`PutAppend` RPC types and
+- [x] **Day 2 — Client-facing RPC handlers.** `Get`/`PutAppend` RPC types and
       handlers: a client calls a server, the server `Propose`s the
       corresponding `Op`, waits for that specific log index to actually
       commit (a per-index completion mechanism — not just "wait for
