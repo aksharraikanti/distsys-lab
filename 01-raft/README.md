@@ -281,6 +281,55 @@ this.)_
   a log that's diverged by a lot — a reasonable stretch goal, not a
   correctness gap.
 
+### Day 11 — Persistence
+- Two genuinely different levels of "crash-safe" were involved, and it's easy
+  to only do the shallower one: (1) *encoding* the right fields (currentTerm,
+  votedFor, log — nothing else, since `state`/`nextIndex`/`matchIndex` are all
+  either volatile-by-design or re-derivable) and (2) *writing* them in a way
+  that survives an actual power-loss-style crash mid-write, not just a clean
+  process exit. `FilePersister` exists because a naive `os.WriteFile` directly
+  to the real path would pass every test that only simulates a restart by
+  discarding a Go struct — it would only fail on the crash a real disk can
+  actually experience, which no unit test can trigger. Getting (1) right
+  without (2) would still be an unsafe implementation.
+- The write-temp-then-rename pattern has THREE separate failure windows, not
+  one, and I want to name all three because it's easy to stop after fixing the
+  first: (a) writing straight to the real path risks a half-written file with
+  no fallback; (b) renaming before fsyncing the temp file risks the rename
+  becoming durable while the actual bytes are still sitting in the OS page
+  cache; (c) — the one I'd genuinely never have known to check without reading
+  about it in advance — a rename is itself a directory-metadata change, and on
+  some filesystems the rename can be lost on crash unless the *directory* is
+  also fsynced afterward. `FilePersister.SaveState` closes all three, in order.
+- `encoding/gob`'s interface-registration requirement (`LogEntry.Command` is
+  `interface{}`, and gob refuses to encode/decode a concrete type inside an
+  interface unless `gob.Register` was called for it first) is a real Go
+  gotcha that only announces itself at decode time, as a runtime error, not a
+  compile error. `gob.Register("")` in `persist.go`'s `init()` covers every
+  test this stage uses; Stage 2's KV store will need its own registration for
+  whatever concrete Command type it introduces. Writing this constraint down
+  explicitly here is cheaper than rediscovering it as a confusing Stage-2 bug.
+- `persistLocked()` gets called at 5 separate mutation sites
+  (`becomeFollowerLocked`, `becomeCandidateLocked`, RequestVote's vote
+  assignment, AppendEntries' log mutation, Propose's log append) rather than
+  through one central choke point, and some paths persist twice in a row (e.g.
+  RequestVote calling `becomeFollowerLocked` and then setting `votedFor`
+  again). That's a real, deliberate inefficiency traded for a much easier
+  correctness argument: every one of these 5 sites is unconditional and
+  independently obviously-correct, instead of relying on careful bookkeeping
+  to persist exactly once per RPC handler and risking missing one.
+- `NewRaft` keeps its original 3-argument signature untouched — adding a
+  persister as a 4th arg would have meant touching every one of the ~50 call
+  sites across 10 days of test files for a capability most of them don't need.
+  `NewRaftWithPersister` is the opt-in constructor Day 11's own tests use;
+  everything from Days 1-10 is completely unaffected, which is exactly why the
+  full existing suite passed unchanged the moment the new code compiled.
+- `TestGrantedVoteSurvivesRestart` is the test that actually closes the loop
+  Day 6 opened: its `TestNodeRestartRejoinsCluster` doc comment explicitly
+  named "a restarted node has no memory of its prior vote" as a real, open
+  safety gap, scoped out on purpose because persistence didn't exist yet. This
+  test is that exact scenario, proven closed.
+
 ### Day 2 — Server states
 -
 

@@ -42,6 +42,12 @@ type Raft struct {
 	peers     []int
 	transport Transport
 
+	// persister durably stores currentTerm/votedFor/log (persist.go). Nil
+	// by default (NewRaft) — a node with no persister is a pure in-memory
+	// node, which is what most tests want. NewRaftWithPersister wires
+	// one in for tests/uses that specifically exercise restart recovery.
+	persister Persister
+
 	state       serverState
 	currentTerm int
 	votedFor    int
@@ -89,15 +95,17 @@ type Raft struct {
 	rngMu sync.Mutex
 }
 
-// NewRaft constructs a node with the given id, its peer ids, and the
-// transport it should use to reach them. Every node starts as a Follower
-// with votedFor at -1 (no peer id is negative), meaning "hasn't voted this
-// term."
-func NewRaft(id int, peers []int, transport Transport) *Raft {
-	return &Raft{
+// newRaft is the shared constructor NewRaft and NewRaftWithPersister both
+// build on. If persister is non-nil, restoreLocked runs before returning
+// — recovering any previously-persisted currentTerm/votedFor/log before
+// the node does anything else, which is what makes a freshly constructed
+// Raft against the SAME persister instance behave like a real restart.
+func newRaft(id int, peers []int, transport Transport, persister Persister) *Raft {
+	r := &Raft{
 		id:        id,
 		peers:     peers,
 		transport: transport,
+		persister: persister,
 		state:     Follower,
 		votedFor:  -1,
 
@@ -107,6 +115,29 @@ func NewRaft(id int, peers []int, transport Transport) *Raft {
 		stopCh:             make(chan struct{}),
 		rng:                rand.New(rand.NewSource(time.Now().UnixNano() ^ int64(id))),
 	}
+	r.restoreLocked()
+	return r
+}
+
+// NewRaft constructs a node with the given id, its peer ids, and the
+// transport it should use to reach them. Every node starts as a Follower
+// with votedFor at -1 (no peer id is negative), meaning "hasn't voted this
+// term." No persister is attached — this node's state lives only in
+// memory, exactly as it has since Day 1. Suitable for the vast majority
+// of tests, which don't exercise crash/restart behavior.
+func NewRaft(id int, peers []int, transport Transport) *Raft {
+	return newRaft(id, peers, transport, nil)
+}
+
+// NewRaftWithPersister constructs a node whose currentTerm, votedFor, and
+// log survive a restart via persister: every mutation to those three
+// fields is durably written before it becomes visible outside this node,
+// and construction itself recovers any existing state before returning.
+// Passing the SAME persister instance to a freshly constructed Raft
+// after discarding the old one is exactly what simulates "restart a
+// crashed node" in tests — see persist_test.go.
+func NewRaftWithPersister(id int, peers []int, transport Transport, persister Persister) *Raft {
+	return newRaft(id, peers, transport, persister)
 }
 
 // RequestVote handles an incoming vote request (Raft paper §5.2, §5.4).
@@ -139,6 +170,11 @@ func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error
 	}
 
 	r.votedFor = args.CandidateID
+	// votedFor just changed again after becomeFollowerLocked's own
+	// persist above (or this node was already at args.Term, so that
+	// persist never ran at all) — either way, this specific mutation
+	// needs its own persist before the vote is granted in the reply.
+	r.persistLocked()
 	reply.VoteGranted = true
 	// Granting a vote means this node just heard from a legitimate,
 	// at-least-as-current candidate — that resets how long it waits before
@@ -200,6 +236,7 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 
 	if len(args.Entries) > 0 {
 		r.log = append(r.log[:args.PrevLogIndex], args.Entries...)
+		r.persistLocked()
 	}
 
 	// Day 9: adopt the leader's commit progress. Capped at this node's own
