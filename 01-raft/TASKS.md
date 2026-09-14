@@ -38,7 +38,7 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
       replicated an entry; followers apply committed entries to a state machine.
 - [x] **Day 10 — Log consistency check.** Implement the `AppendEntries` consistency
       check (prevLogIndex/prevLogTerm) so followers reject/truncate divergent logs.
-- [ ] **Day 11 — Persistence.** Persist term, vote, and log to disk so a crashed node
+- [x] **Day 11 — Persistence.** Persist term, vote, and log to disk so a crashed node
       recovers correctly on restart. Fsync semantics and crash-consistency (partial
       writes, ordering) are notoriously non-obvious the first time — budget for this
       one running long too.

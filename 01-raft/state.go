@@ -65,6 +65,12 @@ func (r *Raft) becomeFollowerLocked(term int) {
 		r.votedFor = -1
 	}
 	r.state = Follower
+	// currentTerm/votedFor are persistent state (Raft paper Figure 2) —
+	// persist unconditionally rather than only when term > currentTerm
+	// actually changed something. A redundant persist of unchanged values
+	// is harmless; a missed one on some future call site that turns out
+	// to matter is a real safety bug (Day 11).
+	r.persistLocked()
 }
 
 // BecomeCandidate starts (or restarts) an election: the node increments
@@ -86,6 +92,12 @@ func (r *Raft) becomeCandidateLocked() error {
 	r.state = Candidate
 	r.currentTerm++
 	r.votedFor = r.id
+	// Must be durable BEFORE this candidacy is announced to anyone — a
+	// crash right after sending RequestVote RPCs but before this
+	// completed would otherwise let a restarted node vote for a
+	// DIFFERENT candidate in a term it (as far as its peers know)
+	// already voted for itself in.
+	r.persistLocked()
 	return nil
 }
 

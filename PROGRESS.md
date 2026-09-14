@@ -1,8 +1,8 @@
 # Progress
 
 Current stage: **01-raft**
-Current day: **Day 11(-13) — Persistence** (next up)
-Status: Day 10 complete
+Current day: **Day 12(-13) — Fault injection tests** (next up)
+Status: Day 11 complete
 
 ## Log
 
@@ -66,3 +66,12 @@ Status: Day 10 complete
   loop. `TestReplicateConvergesADivergedFollower` proves a genuinely diverged
   follower (not just behind, but holding a conflicting entry) gets corrected
   via real rejection-and-backoff, not a lucky one-round overwrite.
+- 2026-09-13 — Day 11 (Persistence) complete: `Persister` interface with
+  `MemoryPersister` (tests) and `FilePersister` (real disk, temp-file +
+  fsync + atomic rename + directory fsync — three separate crash-consistency
+  windows, all closed). `currentTerm`/`votedFor`/`log` persist at 5 mutation
+  sites, unconditionally, before each mutation becomes externally visible.
+  `NewRaftWithPersister` is a new opt-in constructor — `NewRaft`'s signature
+  is untouched, so the full existing suite (Days 1-10) passed unchanged.
+  `TestGrantedVoteSurvivesRestart` closes the exact safety gap Day 6's
+  `TestNodeRestartRejoinsCluster` explicitly flagged as open.

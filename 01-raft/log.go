@@ -22,6 +22,7 @@ func (r *Raft) Propose(command interface{}) (index int, term int, isLeader bool)
 	}
 
 	r.log = append(r.log, LogEntry{Term: r.currentTerm, Command: command})
+	r.persistLocked()
 	r.advanceCommitIndexLocked()
 	return len(r.log), r.currentTerm, true // 1-indexed, matching lastLogInfoLocked
 }
