@@ -37,5 +37,5 @@ plain word — `package raft` — since Go identifiers can't start with a digit)
 | 10 | [Eventual-consistency system](10-eventual-consistency/) | Vector clocks, CRDTs, gossip |
 | — | [Capstone: mini distributed database on AWS](capstone/) | Combines 1-9, deployed on EC2/ECS + ElastiCache + S3/CloudFront |
 
-Only Stage 1 is currently broken into daily tasks — later stages get scoped the same
-way once they're reached, rather than front-loading a full day-by-day plan now.
+Only Stages 1-2 are currently broken into daily tasks — later stages get scoped the
+same way once they're reached, rather than front-loading a full day-by-day plan now.
