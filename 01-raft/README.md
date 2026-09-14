@@ -253,6 +253,34 @@ this.)_
   alternative (an index-out-of-range panic taking down a node) is a much worse
   failure mode than silently deferring an apply by one tick.
 
+### Day 10 — Log consistency check
+- This is the day three separate "not yet, later" notes from earlier days all
+  converged on at once: Day 7's naive trust-the-caller append, Day 8's
+  literally-unreachable rejection/backoff path, and the bounds guard from Day
+  9's apply loop. Writing those notes honestly as I went — rather than
+  pretending each day was fully self-contained — is what made today's actual
+  diff small: the rejection logic slots into a gap that was already shaped for
+  it, instead of requiring a rewrite of everything downstream.
+- The consistency check has to run and potentially reject *before* the
+  existing truncate-and-append code, not after — appending first and rejecting
+  second would mean rejecting an already-corrupted log. Getting the order right
+  here is the whole point of the day; the individual pieces (bounds check, term
+  comparison, truncate-and-replace) were all already written by Days 7-8, just
+  never sequenced correctly relative to each other.
+- `TestReplicateConvergesADivergedFollower` deliberately sets the leader's
+  `nextIndex` optimistically *ahead* of where the actual divergence is
+  (`nextIndex[1] = 3` when the real conflict is at index 2), specifically so
+  the first replication attempt is rejected and the backoff-and-retry loop has
+  to run for real. A test where nextIndex already happened to be correct would
+  never exercise the rejection path at all — same lesson as Day 6's split-vote
+  test needing a *forced*, not incidental, scenario to actually prove anything.
+- What Day 10 deliberately does NOT build: the "conflict hint" optimization
+  (a rejecting follower reporting where its log actually diverges, so the
+  leader can skip back many entries in one round instead of one-at-a-time).
+  The plain per-round decrement this stage uses is correct, just not fast for
+  a log that's diverged by a lot — a reasonable stretch goal, not a
+  correctness gap.
+
 ### Day 2 — Server states
 -
 

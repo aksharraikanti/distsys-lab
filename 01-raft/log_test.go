@@ -101,8 +101,10 @@ func TestAppendEntriesAppendsRealEntries(t *testing.T) {
 
 // TestAppendEntriesOverwritesFromPrevLogIndex proves a follower's log
 // gets overwritten from PrevLogIndex onward when new entries arrive
-// there — the naive "trust PrevLogIndex" version of what Day 10's real
-// consistency check will later guard properly.
+// there. PrevLogTerm must match what's actually at PrevLogIndex (Day 10's
+// consistency check, added after this test was first written) — old-1's
+// term is 1, so PrevLogTerm: 1 is what makes this an accepted overwrite
+// rather than a rejection.
 func TestAppendEntriesOverwritesFromPrevLogIndex(t *testing.T) {
 	r := NewRaft(0, []int{1, 2}, NewFakeTransport())
 	r.mu.Lock()
@@ -114,7 +116,7 @@ func TestAppendEntriesOverwritesFromPrevLogIndex(t *testing.T) {
 	r.mu.Unlock()
 
 	newEntries := []LogEntry{{Term: 2, Command: "new-2"}}
-	args := &AppendEntriesArgs{Term: 2, LeaderID: 1, PrevLogIndex: 1, Entries: newEntries}
+	args := &AppendEntriesArgs{Term: 2, LeaderID: 1, PrevLogIndex: 1, PrevLogTerm: 1, Entries: newEntries}
 
 	var reply AppendEntriesReply
 	if err := r.AppendEntries(args, &reply); err != nil {
