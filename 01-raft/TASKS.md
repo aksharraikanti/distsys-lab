@@ -42,7 +42,7 @@ Check a box only once it's implemented AND tested — "read about it" isn't done
       recovers correctly on restart. Fsync semantics and crash-consistency (partial
       writes, ordering) are notoriously non-obvious the first time — budget for this
       one running long too.
-- [ ] **Day 12(-13) — Fault injection tests.** Using the fake transport from Day 1,
+- [x] **Day 12(-13) — Fault injection tests.** Using the fake transport from Day 1,
       simulate leader crashes, network partitions, and follower restarts; verify the
       cluster always converges to a single consistent log. This is the hardest day in
       the stage — budget for it spilling into a second day.
