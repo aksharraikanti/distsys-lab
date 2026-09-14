@@ -1,11 +1,9 @@
 # Progress
 
-Current stage: **01-raft — COMPLETE**
-Next up: **Stage 2 — Fault-tolerant KV store on Raft** (not yet scoped into
-day-by-day tasks — following the root README's pattern, Stage 2 gets its own
-`TASKS.md` breakdown once work on it actually starts, rather than front-loaded
-now)
-Status: Stage 1 (Raft consensus from scratch), all 12 days complete
+Current stage: **02-kv-store**
+Current day: **Day 2 — Client-facing RPC handlers** (next up)
+Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
+Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Day 1 complete.
 
 ## Log
 
@@ -93,3 +91,14 @@ Status: Stage 1 (Raft consensus from scratch), all 12 days complete
   down, since persistence alone only recovers pre-crash state).
   `assertLogsConsistent` checks the Log Matching Property directly: every
   node's log must agree through the lowest commitIndex anyone has reached.
+- 2026-09-14 — Stage 2 scoped into 8 days (`02-kv-store/TASKS.md`), following
+  MIT 6.5840 Lab 3's structure the same way Stage 1 followed Lab 2. Day 1
+  (Apply-loop scaffolding) complete: `Op` (Put/Append, gob-registered in this
+  package's own `init()` — the exact forward-pointer Stage 1's Day 11 left),
+  `KVServer` wrapping a `*raft.Raft` with an independent apply loop per node.
+  `TestKVStoreConvergesAcrossCluster` proves 3 nodes' independently-running
+  apply loops converge to the identical map with zero coordination between
+  them — Raft's commit-order guarantee is the only thing making that true.
+  `Get` is explicitly NOT linearizable yet (a direct local read, no Raft
+  routing, no leader check) — that's flagged in its own doc comment for a
+  later day to address.
