@@ -23,6 +23,7 @@ func TestPutAppendAndGetRoundTrip(t *testing.T) {
 	defer rf.StopElectionTimer()
 
 	kv := NewKVServer(rf)
+	defer kv.Stop()
 
 	var putReply PutAppendReply
 	if err := kv.PutAppend(&PutAppendArgs{Key: "x", Value: "1", Op: "Put", ClientID: 1, SeqNum: 1}, &putReply); err != nil {
@@ -64,6 +65,7 @@ func TestGetReturnsErrNoKeyForMissingKey(t *testing.T) {
 	defer rf.StopElectionTimer()
 
 	kv := NewKVServer(rf)
+	defer kv.Stop()
 
 	var reply GetReply
 	if err := kv.Get(&GetArgs{Key: "nope"}, &reply); err != nil {
@@ -83,6 +85,7 @@ func TestGetRejectsWhenNotLeader(t *testing.T) {
 	defer rf.StopElectionTimer()
 
 	kv := NewKVServer(rf)
+	defer kv.Stop()
 	var reply GetReply
 	if err := kv.Get(&GetArgs{Key: "x"}, &reply); err != nil {
 		t.Fatalf("Get: %v", err)
@@ -98,6 +101,7 @@ func TestPutAppendRejectsWhenNotLeader(t *testing.T) {
 	defer rf.StopElectionTimer()
 
 	kv := NewKVServer(rf)
+	defer kv.Stop()
 	var reply PutAppendReply
 	if err := kv.PutAppend(&PutAppendArgs{Key: "x", Value: "1", Op: "Put", ClientID: 1, SeqNum: 1}, &reply); err != nil {
 		t.Fatalf("PutAppend: %v", err)
@@ -132,19 +136,12 @@ func TestPutAppendTimesOutWhenEntryNeverCommits(t *testing.T) {
 		for _, rf := range nodes {
 			rf.StopElectionTimer()
 		}
+		for _, kv := range kvs {
+			kv.Stop()
+		}
 	}()
 
-	leaderID := -1
-	waitFor(t, 20*raft.ElectionTimeoutMax, func() bool {
-		leaders := 0
-		for id, rf := range nodes {
-			if rf.State() == raft.Leader {
-				leaders++
-				leaderID = id
-			}
-		}
-		return leaders == 1
-	})
+	leaderID := waitForSingleLeader(t, nodes, 20*raft.ElectionTimeoutMax)
 
 	// Isolate the leader completely — it can never reach a majority, so
 	// nothing it Proposes can ever commit.
@@ -202,6 +199,9 @@ func TestPutAppendDetectsSupersededProposal(t *testing.T) {
 	defer func() {
 		for _, rf := range nodes {
 			rf.StopElectionTimer()
+		}
+		for _, kv := range kvs {
+			kv.Stop()
 		}
 	}()
 

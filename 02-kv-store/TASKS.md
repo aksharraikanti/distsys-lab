@@ -32,12 +32,17 @@ tested — "read about it" isn't done.
       term at that index changed, or this node stopped being leader) and
       report failure/retry — never hang forever, and never falsely report
       success for an entry that got silently discarded.
-- [ ] **Day 5 — Concurrent client stress test.** Many simulated clients
+- [x] **Day 5 — Concurrent client stress test.** Many simulated clients
       hammering Get/Put/Append concurrently, through the same fault injection
       Stage 1 Day 12 built (leader crashes, partitions). The invariant under
       test: every acknowledged write is durably visible to every subsequent
       read, and no acknowledged write is ever lost — this is where the whole
-      stage either holds together or doesn't.
+      stage either holds together or doesn't. Turned up three real bugs along
+      the way: a freshly-elected leader serving stale reads until something in
+      its own term commits (fixed with a Raft §8 no-op-on-election), a
+      goroutine leak in `KVServer`'s loops that caused cross-test flakiness
+      (fixed with `Stop()`), and a `Clerk` ClientID collision from
+      time-seeded `math/rand` (fixed by drawing from `crypto/rand` instead).
 - [ ] **Day 6 — Snapshotting.** Once the Raft log grows past a size
       threshold, `KVServer` serializes its current map into a snapshot and
       tells Raft it can discard log entries up to that point — otherwise the

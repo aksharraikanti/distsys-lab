@@ -59,22 +59,49 @@ type KVServer struct {
 	// what will let this table survive a snapshot later (Day 6) instead
 	// of being lost the moment the log gets compacted.
 	duplicateTable map[int64]int64
+
+	// stopCh/stopOnce shut down applyLoop and noopLoop. Day 5's own
+	// stress test is what surfaced why this needs to be real rather
+	// than deferred: a Go test binary runs every test in one process,
+	// and an un-stoppable noopLoop ticking forever on an orphaned
+	// KVServer from an EARLIER test — one whose underlying Raft node
+	// happened to still be Leader when that test ended — keeps
+	// proposing no-ops against it indefinitely. Enough of those
+	// accumulate across a test run to visibly contend for scheduler
+	// time and introduce exactly the kind of timing flakiness this
+	// project has already had to fix once in 01-raft. Stop closes this
+	// for real, the same idempotent-via-sync.Once shape raft.Raft's own
+	// StopElectionTimer uses.
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // NewKVServer wraps rf and starts the apply loop that keeps this node's
 // store in sync with its Raft log. The caller is still responsible for
 // starting rf's own background loops (RunElectionTimer, RunHeartbeats,
-// RunApplyLoop) — NewKVServer only starts its own consumer of
-// rf.ApplyCh, which those loops feed.
+// RunApplyLoop) — NewKVServer only starts its own consumers of
+// rf.ApplyCh and rf.State(), which those loops feed. Call Stop when
+// done with this KVServer to shut those consumers down.
 func NewKVServer(rf *raft.Raft) *KVServer {
 	kv := &KVServer{
 		rf:             rf,
 		store:          make(map[string]string),
 		notifyChans:    make(map[int]chan Op),
 		duplicateTable: make(map[int64]int64),
+		stopCh:         make(chan struct{}),
 	}
 	go kv.applyLoop()
+	go kv.noopLoop()
 	return kv
+}
+
+// Stop terminates this KVServer's background goroutines (applyLoop,
+// noopLoop). Safe to call more than once. Does not touch the underlying
+// *raft.Raft — stop that separately via StopElectionTimer.
+func (kv *KVServer) Stop() {
+	kv.stopOnce.Do(func() {
+		close(kv.stopCh)
+	})
 }
 
 // applyLoop consumes rf.ApplyCh and applies each committed Put/Append to
@@ -86,7 +113,14 @@ func NewKVServer(rf *raft.Raft) *KVServer {
 // even though the mutation it asked for already happened via an earlier
 // attempt.
 func (kv *KVServer) applyLoop() {
-	for msg := range kv.rf.ApplyCh {
+	for {
+		var msg raft.ApplyMsg
+		select {
+		case <-kv.stopCh:
+			return
+		case msg = <-kv.rf.ApplyCh:
+		}
+
 		op, ok := msg.Command.(Op)
 		if !ok {
 			// This server only ever proposes Op values — a non-Op
@@ -103,6 +137,9 @@ func (kv *KVServer) applyLoop() {
 				kv.store[op.Key] = op.Value
 			case "Append":
 				kv.store[op.Key] += op.Value
+			case "Noop":
+				// Intentionally does nothing to the store — see
+				// noopLoop's doc comment for why this op exists at all.
 			default:
 				panic(fmt.Sprintf("kvstore: applyLoop received an unknown Op type %q at index %d", op.Type, msg.Index))
 			}
@@ -113,6 +150,52 @@ func (kv *KVServer) applyLoop() {
 			ch <- op
 		}
 		kv.mu.Unlock()
+	}
+}
+
+// noopLoop watches for this node becoming leader and, once per new term
+// it observes itself leading, Proposes a no-op entry. This is the
+// standard fix the Raft paper itself names (§8): per Day 9's Figure 8
+// safety rule, a freshly-elected leader can't mark ANY older-term entry
+// committed until something in its OWN term reaches a majority — so
+// immediately after an election, this node's own view of "what's
+// committed" can lag behind what a majority of the cluster actually
+// holds, even though the up-to-date voting rule guarantees this
+// leader's LOG already has every one of those entries. Left alone, that
+// window means Get can serve a stale or missing read for a key that is,
+// from the cluster's perspective, already durable — exactly the failure
+// TestConcurrentClientsWithFaultInjection caught. Proposing a no-op the
+// instant this node becomes leader is what closes that window as fast
+// as possible: once the no-op itself commits, Figure 8 transitively
+// re-confirms everything before it.
+//
+// Every no-op uses ClientID 0, which no real Clerk will ever collide
+// with (Clerk.clientID is drawn from crypto/rand, so a collision with
+// the single reserved sentinel value is astronomically unlikely) — and
+// since a no-op never mutates the store, whether the dedup check
+// happens to treat any particular no-op as "already seen" makes no
+// observable difference either way.
+func (kv *KVServer) noopLoop() {
+	ticker := time.NewTicker(leaderCheckInterval)
+	defer ticker.Stop()
+
+	lastNoopTerm := -1
+	for {
+		select {
+		case <-kv.stopCh:
+			return
+		case <-ticker.C:
+			if kv.rf.State() != raft.Leader {
+				continue
+			}
+			term := kv.rf.Term()
+			if term == lastNoopTerm {
+				continue
+			}
+			if _, _, isLeader := kv.rf.Propose(Op{Type: "Noop"}); isLeader {
+				lastNoopTerm = term
+			}
+		}
 	}
 }
 
@@ -128,12 +211,15 @@ func (kv *KVServer) get(key string) (value string, ok bool) {
 	return value, ok
 }
 
-// Get is the client-facing RPC handler for a read. Still NOT
-// linearizable: it checks that this node currently believes itself to
-// be Leader, but that belief can be stale (e.g. a former leader that's
-// been silently partitioned away doesn't know it's been superseded) —
-// closing that gap for real (routing reads through the log, or a
-// leader-lease scheme) is explicitly a later day's job, not this one's.
+// Get is the client-facing RPC handler for a read. Day 5's noopLoop
+// closes the "freshly-elected leader hasn't confirmed its own older
+// entries yet" gap, but Get is still NOT fully linearizable: it checks
+// that this node currently believes itself to be Leader, and that
+// belief itself can be stale — a leader that's been silently
+// partitioned away doesn't know it's been superseded, and would happily
+// keep answering Gets from its own (now stale) local store. Closing
+// that gap for real (routing reads through the log, or a leader-lease
+// scheme) is explicitly a later day's job, not this one's.
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) error {
 	if kv.rf.State() != raft.Leader {
 		reply.Err = ErrWrongLeader

@@ -40,6 +40,26 @@ func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
 	}
 }
 
+// waitForSingleLeader polls until exactly one node in nodes is Leader
+// and returns its id — the same helper 01-raft's own fault-injection
+// tests use, pulled out here (Day 5) after this exact inline loop had
+// already been copy-pasted into two earlier test files in this package.
+func waitForSingleLeader(t *testing.T, nodes map[int]*raft.Raft, timeout time.Duration) int {
+	t.Helper()
+	leaderID := -1
+	waitFor(t, timeout, func() bool {
+		leaders := 0
+		for id, rf := range nodes {
+			if rf.State() == raft.Leader {
+				leaders++
+				leaderID = id
+			}
+		}
+		return leaders == 1
+	})
+	return leaderID
+}
+
 // TestApplyLoopAppliesPutAndAppend proves Day 1's headline requirement:
 // Put sets a key, Append concatenates onto whatever's already there.
 func TestApplyLoopAppliesPutAndAppend(t *testing.T) {
@@ -54,6 +74,7 @@ func TestApplyLoopAppliesPutAndAppend(t *testing.T) {
 	defer rf.StopElectionTimer()
 
 	kv := NewKVServer(rf)
+	defer kv.Stop()
 
 	if _, _, ok := rf.Propose(Op{Type: "Put", Key: "x", Value: "1", ClientID: 1, SeqNum: 1}); !ok {
 		t.Fatal("Propose(Put) should succeed on the leader")
@@ -85,6 +106,7 @@ func TestApplyLoopPreservesCommitOrder(t *testing.T) {
 	defer rf.StopElectionTimer()
 
 	kv := NewKVServer(rf)
+	defer kv.Stop()
 
 	for i, part := range []string{"a", "b", "c", "d"} {
 		op := Op{Type: "Append", Key: "seq", Value: part, ClientID: 1, SeqNum: int64(i + 1)}
@@ -107,6 +129,7 @@ func TestGetReturnsFalseForMissingKey(t *testing.T) {
 	defer rf.StopElectionTimer()
 
 	kv := NewKVServer(rf)
+	defer kv.Stop()
 	if v, ok := kv.get("nope"); ok || v != "" {
 		t.Fatalf("Get(missing key) = (%q, %v), want (\"\", false)", v, ok)
 	}
@@ -138,19 +161,12 @@ func TestKVStoreConvergesAcrossCluster(t *testing.T) {
 		for _, rf := range nodes {
 			rf.StopElectionTimer()
 		}
+		for _, kv := range kvs {
+			kv.Stop()
+		}
 	}()
 
-	leaderID := -1
-	waitFor(t, 20*raft.ElectionTimeoutMax, func() bool {
-		leaders := 0
-		for id, rf := range nodes {
-			if rf.State() == raft.Leader {
-				leaders++
-				leaderID = id
-			}
-		}
-		return leaders == 1
-	})
+	leaderID := waitForSingleLeader(t, nodes, 20*raft.ElectionTimeoutMax)
 
 	if _, _, ok := nodes[leaderID].Propose(Op{Type: "Put", Key: "x", Value: "1", ClientID: 1, SeqNum: 1}); !ok {
 		t.Fatal("Propose(Put) should succeed on the leader")
