@@ -25,7 +25,7 @@ tested — "read about it" isn't done.
       snapshots later). A client retries a request whenever it can't tell if
       its last one succeeded (timeout, leader change) — without this, a
       retried Append would silently double-apply.
-- [ ] **Day 4 — Leader-change correctness.** A command can be `Propose`d,
+- [x] **Day 4 — Leader-change correctness.** A command can be `Propose`d,
       start replicating, and then never commit because this node loses
       leadership before a majority confirms it (a fresher leader's log
       overwrites the entry). The waiting client must detect this (e.g. the

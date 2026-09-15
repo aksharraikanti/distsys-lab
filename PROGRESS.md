@@ -1,9 +1,9 @@
 # Progress
 
 Current stage: **02-kv-store**
-Current day: **Day 4 — Leader-change correctness** (next up)
+Current day: **Day 5 — Concurrent client stress test** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
-Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-3 complete.
+Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-4 complete.
 
 ## Log
 
@@ -136,3 +136,15 @@ Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-3 complete.
   dedup-evading loophole). `TestStaleRetryAfterNewerRequestSuppressed` proves
   the comparison must be strict `>`, not `!=`/`==` — a subtly wrong version
   would pass every other test in the file.
+- 2026-09-15 — Day 4 (Leader-change correctness) complete: `PutAppend` now
+  polls (`leaderCheckInterval`) whether it's still leader of the term it
+  Proposed in, while waiting for its entry to commit — a fast bailout for the
+  case Day 2's supersession check couldn't catch: this node loses leadership
+  and NOTHING ever lands at that log index again, so the notify channel never
+  fires and the only fallback was the full `commitTimeout`. Not a new
+  correctness guarantee (Day 2 already got there eventually via timeout) — a
+  much faster path to the same conclusion.
+  `TestPutAppendBailsOutQuicklyWhenLeadershipLost` proves the fast path;
+  `TestPutAppendSucceedsWhenLeadershipNeverLost` guards against the new
+  polling loop misfiring into a false failure on an ordinary successful
+  commit.
