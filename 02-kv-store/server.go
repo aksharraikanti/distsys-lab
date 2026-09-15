@@ -17,13 +17,11 @@ import (
 const commitTimeout = 20 * raft.ElectionTimeoutMax
 
 // KVServer is a key-value state machine driven by a Raft node's
-// committed log. As of Day 2, Get and PutAppend are real client-facing
-// operations: PutAppend proposes to Raft and waits for its specific
-// entry to commit before replying; Get answers directly from local
-// state, gated on this node believing itself to be the leader. There is
-// still no duplicate request detection (Day 3) and no handling of a
-// leader that discovers, only after already replying, that it never
-// actually held a majority for that term (Day 4).
+// committed log. As of Day 3: Get and PutAppend are real client-facing
+// operations, and a retried PutAppend (same ClientID+SeqNum landing at a
+// new log index) has its effect applied at most once. There is still no
+// handling of a leader that discovers, only after already replying, that
+// it never actually held a majority for that term (Day 4).
 type KVServer struct {
 	mu    sync.Mutex
 	rf    *raft.Raft
@@ -35,6 +33,17 @@ type KVServer struct {
 	// applyLoop's send never blocks even if the waiter already gave up
 	// on a timeout.
 	notifyChans map[int]chan Op
+
+	// duplicateTable[clientID] is the highest SeqNum from that client
+	// whose effect has already been applied. Tracked here, in the state
+	// machine, not in the RPC handler layer — every replica applies the
+	// same committed log in the same order, so every replica computes
+	// the identical answer to "have I seen this one before," which is
+	// what makes the dedup decision itself replicated and consistent
+	// rather than a per-node guess. Living in the state machine is also
+	// what will let this table survive a snapshot later (Day 6) instead
+	// of being lost the moment the log gets compacted.
+	duplicateTable map[int64]int64
 }
 
 // NewKVServer wraps rf and starts the apply loop that keeps this node's
@@ -44,17 +53,23 @@ type KVServer struct {
 // rf.ApplyCh, which those loops feed.
 func NewKVServer(rf *raft.Raft) *KVServer {
 	kv := &KVServer{
-		rf:          rf,
-		store:       make(map[string]string),
-		notifyChans: make(map[int]chan Op),
+		rf:             rf,
+		store:          make(map[string]string),
+		notifyChans:    make(map[int]chan Op),
+		duplicateTable: make(map[int64]int64),
 	}
 	go kv.applyLoop()
 	return kv
 }
 
 // applyLoop consumes rf.ApplyCh and applies each committed Put/Append to
-// the local store, in the exact order Raft committed them, and wakes up
-// any PutAppend call waiting on that specific index.
+// the local store, in the exact order Raft committed them — except a
+// duplicate (op.SeqNum <= the highest SeqNum already applied for
+// op.ClientID) is recognized and its effect skipped, so a retried
+// request never double-applies. Either way, the index's waiter (if any)
+// is still notified: the RETRY's own RPC call still needs its own reply,
+// even though the mutation it asked for already happened via an earlier
+// attempt.
 func (kv *KVServer) applyLoop() {
 	for msg := range kv.rf.ApplyCh {
 		op, ok := msg.Command.(Op)
@@ -67,13 +82,16 @@ func (kv *KVServer) applyLoop() {
 		}
 
 		kv.mu.Lock()
-		switch op.Type {
-		case "Put":
-			kv.store[op.Key] = op.Value
-		case "Append":
-			kv.store[op.Key] += op.Value
-		default:
-			panic(fmt.Sprintf("kvstore: applyLoop received an unknown Op type %q at index %d", op.Type, msg.Index))
+		if op.SeqNum > kv.duplicateTable[op.ClientID] {
+			switch op.Type {
+			case "Put":
+				kv.store[op.Key] = op.Value
+			case "Append":
+				kv.store[op.Key] += op.Value
+			default:
+				panic(fmt.Sprintf("kvstore: applyLoop received an unknown Op type %q at index %d", op.Type, msg.Index))
+			}
+			kv.duplicateTable[op.ClientID] = op.SeqNum
 		}
 		if ch, waiting := kv.notifyChans[msg.Index]; waiting {
 			delete(kv.notifyChans, msg.Index)
@@ -126,7 +144,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) error {
 // should retry (almost certainly against a new leader), so that case is
 // reported the same way as ErrWrongLeader rather than as a false OK.
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
-	op := Op{Type: args.Op, Key: args.Key, Value: args.Value}
+	op := Op{Type: args.Op, Key: args.Key, Value: args.Value, ClientID: args.ClientID, SeqNum: args.SeqNum}
 
 	index, _, isLeader := kv.rf.Propose(op)
 	if !isLeader {

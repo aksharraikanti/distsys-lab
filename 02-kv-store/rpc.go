@@ -29,6 +29,14 @@ type PutAppendArgs struct {
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
+
+	// ClientID/SeqNum identify this request for duplicate detection (Day
+	// 3) — see Op's doc comment for the exact contract. The caller (a
+	// real client library, or a test standing in for one) owns
+	// generating a stable ClientID and a strictly increasing SeqNum per
+	// new logical request; PutAppend does not invent these itself.
+	ClientID int64
+	SeqNum   int64
 }
 
 type PutAppendReply struct {

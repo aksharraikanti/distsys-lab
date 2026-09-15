@@ -25,7 +25,7 @@ func TestPutAppendAndGetRoundTrip(t *testing.T) {
 	kv := NewKVServer(rf)
 
 	var putReply PutAppendReply
-	if err := kv.PutAppend(&PutAppendArgs{Key: "x", Value: "1", Op: "Put"}, &putReply); err != nil {
+	if err := kv.PutAppend(&PutAppendArgs{Key: "x", Value: "1", Op: "Put", ClientID: 1, SeqNum: 1}, &putReply); err != nil {
 		t.Fatalf("PutAppend: %v", err)
 	}
 	if putReply.Err != OK {
@@ -33,7 +33,7 @@ func TestPutAppendAndGetRoundTrip(t *testing.T) {
 	}
 
 	var appendReply PutAppendReply
-	if err := kv.PutAppend(&PutAppendArgs{Key: "x", Value: "-more", Op: "Append"}, &appendReply); err != nil {
+	if err := kv.PutAppend(&PutAppendArgs{Key: "x", Value: "-more", Op: "Append", ClientID: 1, SeqNum: 2}, &appendReply); err != nil {
 		t.Fatalf("PutAppend: %v", err)
 	}
 	if appendReply.Err != OK {
@@ -99,7 +99,7 @@ func TestPutAppendRejectsWhenNotLeader(t *testing.T) {
 
 	kv := NewKVServer(rf)
 	var reply PutAppendReply
-	if err := kv.PutAppend(&PutAppendArgs{Key: "x", Value: "1", Op: "Put"}, &reply); err != nil {
+	if err := kv.PutAppend(&PutAppendArgs{Key: "x", Value: "1", Op: "Put", ClientID: 1, SeqNum: 1}, &reply); err != nil {
 		t.Fatalf("PutAppend: %v", err)
 	}
 	if reply.Err != ErrWrongLeader {
@@ -153,7 +153,7 @@ func TestPutAppendTimesOutWhenEntryNeverCommits(t *testing.T) {
 
 	var reply PutAppendReply
 	start := time.Now()
-	if err := kvs[leaderID].PutAppend(&PutAppendArgs{Key: "x", Value: "1", Op: "Put"}, &reply); err != nil {
+	if err := kvs[leaderID].PutAppend(&PutAppendArgs{Key: "x", Value: "1", Op: "Put", ClientID: 1, SeqNum: 1}, &reply); err != nil {
 		t.Fatalf("PutAppend: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -219,7 +219,7 @@ func TestPutAppendDetectsSupersededProposal(t *testing.T) {
 	replyCh := make(chan PutAppendReply, 1)
 	go func() {
 		var reply PutAppendReply
-		_ = kvs[0].PutAppend(&PutAppendArgs{Key: "x", Value: "from-node0", Op: "Put"}, &reply)
+		_ = kvs[0].PutAppend(&PutAppendArgs{Key: "x", Value: "from-node0", Op: "Put", ClientID: 1, SeqNum: 1}, &reply)
 		replyCh <- reply
 	}()
 
@@ -240,7 +240,7 @@ func TestPutAppendDetectsSupersededProposal(t *testing.T) {
 	if err := nodes[1].BecomeLeader(); err != nil {
 		t.Fatalf("BecomeLeader (node1): %v", err)
 	}
-	if _, _, ok := nodes[1].Propose(Op{Type: "Put", Key: "x", Value: "from-node1"}); !ok {
+	if _, _, ok := nodes[1].Propose(Op{Type: "Put", Key: "x", Value: "from-node1", ClientID: 2, SeqNum: 1}); !ok {
 		t.Fatal("Propose on node1 should succeed")
 	}
 
