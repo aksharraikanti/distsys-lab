@@ -22,8 +22,17 @@ import (
 // its next heartbeat was even due to arrive. It only became load-bearing
 // once Day 5 wired heartbeats up to actually reset followers' timers;
 // before that, nothing depended on the gap between the two.
+//
+// ElectionTimeoutMin sits at 10x HeartbeatInterval rather than the 5x this
+// started at: `go test ./...` runs 01-raft and 02-kv-store's -race binaries
+// concurrently, and under that CPU contention a single heartbeat can be
+// scheduler-delayed close enough to a 5x floor to trip a spurious election
+// (see TestHeartbeatsKeepLeaderStable flakiness). 10x buys headroom against
+// that jitter. Only the floor moves — ElectionTimeoutMax stays put so the
+// many `N * ElectionTimeoutMax` wait windows elsewhere in the suite don't
+// grow and drag other tests further into that same contention window.
 const (
-	ElectionTimeoutMin = 10 * time.Millisecond
+	ElectionTimeoutMin = 20 * time.Millisecond
 	ElectionTimeoutMax = 50 * time.Millisecond
 	HeartbeatInterval  = 2 * time.Millisecond
 )
