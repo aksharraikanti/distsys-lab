@@ -108,6 +108,33 @@ _(fill this in as you learn — one section per day, in your own words.)_
   regardless of whether its SeqNum happens to differ from the current
   high-water mark.
 
+### Day 4 — Leader-change correctness
+- This day turned out to be about a gap Day 2 left half-closed, not a whole
+  new mechanism. Day 2's `applied != op` check already correctly detects
+  supersession — but only IF something new eventually lands at that exact log
+  index. If this node loses leadership and NOTHING ever writes to that index
+  again (a real possibility — a future leader has no obligation to ever touch
+  that specific slot), the notify channel simply never fires, and the only
+  thing Day 2 had to fall back on was the full `commitTimeout`. That's correct
+  but slow. The actual improvement here isn't a new correctness guarantee, it's
+  a MUCH faster way to reach the same, already-correct conclusion.
+- `leaderCheckInterval`'s poll checks BOTH `Term() != term` and `State() !=
+  Leader`, not just one — documented explicitly as belt-and-suspenders around
+  the same underlying fact rather than two independent checks. As long as this
+  node has stayed Leader continuously, in the SAME term, since it Proposed,
+  nothing else could have written to that index without its own consent — the
+  term changing (or ceasing to be Leader) is definitionally what a step-down
+  looks like from the inside. Checking both costs nothing and reads clearly;
+  checking only one would be equally correct but less obviously so on a
+  first read.
+- `TestPutAppendSucceedsWhenLeadershipNeverLost` exists specifically because
+  adding a polling loop to an otherwise event-driven wait is exactly the kind
+  of change that can introduce a race nobody intended — a poll firing at the
+  "wrong" moment relative to a legitimate, in-flight commit could in principle
+  misfire into a false `ErrWrongLeader`. This test is the guard against that:
+  proving the happy path still reliably returns `OK`, not just that the new
+  unhappy path works.
+
 _(continue per day)_
 
 ## Reference material

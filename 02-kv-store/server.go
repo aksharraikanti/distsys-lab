@@ -12,16 +12,31 @@ import (
 // its proposed command to actually commit before giving up and telling
 // the client to retry elsewhere. Raft never guarantees a Proposed entry
 // commits — this node can lose leadership before a majority confirms it
-// (see PutAppend, and Day 4's closer look at that scenario) — so waiting
-// forever isn't an option.
-const commitTimeout = 20 * raft.ElectionTimeoutMax
+// (see PutAppend) — so waiting forever isn't an option.
+//
+// leaderCheckInterval is how often PutAppend polls whether it's still
+// leader of the term it Proposed in, while waiting for its entry to
+// commit (Day 4). This is the FAST path out of a doomed wait: if this
+// node loses leadership, its still-uncommitted entry can be silently
+// overwritten by whoever becomes leader next, and nothing will ever
+// arrive on the notify channel to say so — there's no guarantee ANY
+// future entry lands at that exact index again. Waiting for the full
+// commitTimeout in that case would be needlessly slow when the node
+// already knows, almost immediately, that it's no longer in a position
+// to get this entry committed.
+const (
+	commitTimeout       = 20 * raft.ElectionTimeoutMax
+	leaderCheckInterval = raft.HeartbeatInterval
+)
 
 // KVServer is a key-value state machine driven by a Raft node's
-// committed log. As of Day 3: Get and PutAppend are real client-facing
-// operations, and a retried PutAppend (same ClientID+SeqNum landing at a
-// new log index) has its effect applied at most once. There is still no
-// handling of a leader that discovers, only after already replying, that
-// it never actually held a majority for that term (Day 4).
+// committed log. Get and PutAppend are real client-facing operations; a
+// retried PutAppend (same ClientID+SeqNum landing at a new log index)
+// has its effect applied at most once (Day 3); and a PutAppend whose
+// proposal is superseded — either by a different entry landing at the
+// same index, or by this node losing leadership before anything lands
+// there at all — is detected and reported rather than hanging or
+// falsely reporting success (Day 4).
 type KVServer struct {
 	mu    sync.Mutex
 	rf    *raft.Raft
@@ -139,14 +154,26 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) error {
 // commit — not just "wait for commitIndex to reach some number" —
 // because a Proposed-but-uncommitted entry can be overwritten by a
 // later leader's entry at the same index if this node loses leadership
-// before a majority ever confirms it. If a DIFFERENT Op ends up
-// committed at that index, this proposal was superseded: the client
-// should retry (almost certainly against a new leader), so that case is
-// reported the same way as ErrWrongLeader rather than as a false OK.
+// before a majority ever confirms it. There are two distinct ways this
+// handler learns its proposal is doomed, and it needs both:
+//
+//  1. A DIFFERENT Op ends up committed at the same index (the notify
+//     channel delivers it) — this proposal was superseded by whichever
+//     leader's entry actually won that slot.
+//  2. This node stops being leader of the term it Proposed in, before
+//     anything else ever lands at that index (Day 4). Nothing then
+//     guarantees the notify channel ever fires again — the index might
+//     never be touched by a future leader at all — so waiting for case 1
+//     or the full commitTimeout would be needlessly slow when the answer
+//     is already knowable. leaderCheckInterval polls for exactly this.
+//
+// Either way the client is told the same thing: retry, almost certainly
+// against a new leader, rather than getting a false OK for an entry that
+// got silently discarded.
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 	op := Op{Type: args.Op, Key: args.Key, Value: args.Value, ClientID: args.ClientID, SeqNum: args.SeqNum}
 
-	index, _, isLeader := kv.rf.Propose(op)
+	index, term, isLeader := kv.rf.Propose(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return nil
@@ -162,15 +189,34 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 		kv.mu.Unlock()
 	}()
 
-	select {
-	case applied := <-ch:
-		if applied != op {
-			reply.Err = ErrWrongLeader
+	leaderCheck := time.NewTicker(leaderCheckInterval)
+	defer leaderCheck.Stop()
+	deadline := time.After(commitTimeout)
+
+	for {
+		select {
+		case applied := <-ch:
+			if applied != op {
+				reply.Err = ErrWrongLeader
+				return nil
+			}
+			reply.Err = OK
 			return nil
+		case <-deadline:
+			reply.Err = ErrTimeout
+			return nil
+		case <-leaderCheck.C:
+			// Checking BOTH the term and State() != Leader is belt and
+			// suspenders around the same underlying fact: as long as this
+			// node has remained Leader continuously since Propose, in
+			// the SAME term, nothing else could have written to this
+			// index without its own consent — the term changing (or the
+			// state no longer being Leader) is what actually signals a
+			// step-down happened.
+			if kv.rf.Term() != term || kv.rf.State() != raft.Leader {
+				reply.Err = ErrWrongLeader
+				return nil
+			}
 		}
-		reply.Err = OK
-	case <-time.After(commitTimeout):
-		reply.Err = ErrTimeout
 	}
-	return nil
 }
