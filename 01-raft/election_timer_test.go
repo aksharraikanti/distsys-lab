@@ -59,7 +59,13 @@ func TestResetElectionTimerPreventsTimeout(t *testing.T) {
 
 	stopResets := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(ElectionTimeoutMin / 2)
+		// ElectionTimeoutMin/4, not /2: under real scheduler contention
+		// (go test ./... runs 01-raft and 02-kv-store's -race binaries
+		// concurrently), a delayed tick eats into the safety margin in
+		// absolute terms regardless of how the constants themselves are
+		// scaled — a smaller fraction of the floor buys more headroom
+		// against that jitter.
+		ticker := time.NewTicker(ElectionTimeoutMin / 4)
 		defer ticker.Stop()
 		for {
 			select {
