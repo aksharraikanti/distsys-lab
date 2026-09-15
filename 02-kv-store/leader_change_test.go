@@ -26,6 +26,7 @@ func TestPutAppendBailsOutQuicklyWhenLeadershipLost(t *testing.T) {
 	defer rf.StopElectionTimer()
 
 	kv := NewKVServer(rf)
+	defer kv.Stop()
 
 	replyCh := make(chan PutAppendReply, 1)
 	start := time.Now()
@@ -75,6 +76,7 @@ func TestPutAppendSucceedsWhenLeadershipNeverLost(t *testing.T) {
 	defer rf.StopElectionTimer()
 
 	kv := NewKVServer(rf)
+	defer kv.Stop()
 
 	// A single-node cluster commits immediately, but the poll loop still
 	// runs at least once before the notify channel fires (leaderCheckInterval

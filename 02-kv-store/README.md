@@ -135,6 +135,60 @@ _(fill this in as you learn — one section per day, in your own words.)_
   proving the happy path still reliably returns `OK`, not just that the new
   unhappy path works.
 
+### Day 5 — Concurrent client stress test
+- Writing `Clerk` surfaced a design point worth naming explicitly: a single
+  `Clerk` is NOT safe for concurrent use — its `seqNum` counter and
+  `lastKnown` server hint aren't synchronized. That's fine (even correct) for
+  this stage's model, where each simulated client gets its OWN `Clerk`
+  instance, but it would silently corrupt the ClientID/SeqNum contract Day 3
+  depends on if two goroutines ever shared one. Worth a comment on the type,
+  not just something to remember.
+- The headline invariant — every acknowledged write durably visible, no
+  acknowledged write ever lost — turned up three separate, real bugs, each
+  discovered because concurrency + fault injection finally exercised code
+  paths the single-threaded Day 1-4 tests never reached:
+  1. **Stale reads from a freshly-elected leader.** Day 9's Figure 8 rule (a
+     new leader can't mark any older-term entry committed until something in
+     its OWN term reaches a majority) means a brand-new leader's view of
+     "what's committed" can lag behind what a majority of the cluster
+     actually holds — even though its LOG already has every one of those
+     entries, thanks to the up-to-date voting rule. `Get` would serve
+     `ErrNoKey` for a key the cluster had already durably written. Fixed with
+     the exact technique the Raft paper names for this (§8): `noopLoop`
+     proposes a no-op entry once per newly-observed leadership term, and once
+     THAT commits, Figure 8 transitively reconfirms everything that came
+     before it.
+  2. **A goroutine leak that looked like unrelated flakiness.** `applyLoop`
+     and `noopLoop` had no shutdown mechanism, so every earlier test's
+     orphaned `KVServer`s — especially ones whose Raft node was still Leader
+     when the test ended — leaked those goroutines for the rest of the whole
+     test binary's process lifetime. An orphaned, ever-ticking `noopLoop`
+     kept calling `Propose` against a stale Raft instance, accumulating
+     scheduler contention across the whole run. Same underlying lesson as the
+     Stage 1 flaky-test fix, just in a new spot: added `stopCh`/`stopOnce`/
+     `Stop()` to `KVServer`, the same idempotent-close shape
+     `raft.Raft.StopElectionTimer` already used, and called it everywhere a
+     test constructs a `KVServer`.
+  3. **`Clerk` ClientID collisions.** The subtlest of the three, and the one
+     that took the longest to pin down: `NewClerk` seeded `math/rand` from
+     `time.Now().UnixNano()`. Launching several client goroutines back to
+     back (exactly what the stress test does) can construct two `Clerk`s
+     within the same wall-clock nanosecond, which seeds them identically and
+     hands out the SAME "random" ClientID to two genuinely different
+     clients. That collision corrupts `duplicateTable`'s per-ClientID
+     tracking: one client's write gets treated as an already-seen duplicate
+     of the other's and its mutation is silently skipped — yet `PutAppend`
+     still reports `OK`, because the notify channel fires unconditionally on
+     the proposed op matching what came back, regardless of whether the
+     dedup check actually let the mutation through. That's what made it look
+     exactly like data loss with no error anywhere: a fully successful-looking
+     RPC round trip whose effect never happened. Root-caused by tracing one
+     specific ClientID through a debug log and finding it used by Propose
+     calls for two different clients' keys. Fixed by drawing ClientID from
+     `crypto/rand` instead of a wall-clock-seeded `math/rand` source — cheap,
+     and removes the whole class of seed-collision risk rather than just
+     widening the window.
+
 _(continue per day)_
 
 ## Reference material

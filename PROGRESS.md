@@ -1,9 +1,9 @@
 # Progress
 
 Current stage: **02-kv-store**
-Current day: **Day 5 — Concurrent client stress test** (next up)
+Current day: **Day 6 — Snapshotting** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
-Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-4 complete.
+Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-5 complete.
 
 ## Log
 
@@ -148,3 +148,25 @@ Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-4 complete.
   `TestPutAppendSucceedsWhenLeadershipNeverLost` guards against the new
   polling loop misfiring into a false failure on an ordinary successful
   commit.
+- 2026-09-15 — Day 5 (Concurrent client stress test) complete: `Clerk` (retry
+  client, ClientID+SeqNum per Day 3's contract) and two stress tests —
+  many-clients-no-faults, and many-clients-through-real-fault-injection reused
+  from Stage 1 Day 12's `FakeTransport`. Found and fixed three real bugs along
+  the way, none of which any earlier single-threaded test could have caught:
+  (1) a freshly-elected leader serving stale/missing reads until something in
+  its own term commits, per Day 9's Figure 8 rule — fixed with the Raft
+  paper's own §8 technique, a no-op entry proposed once per newly-observed
+  leadership term (`noopLoop`); (2) `applyLoop`/`noopLoop` goroutines with no
+  shutdown path, leaking across the whole test binary and contending for
+  scheduler time once enough orphaned `KVServer`s piled up — fixed with a
+  `stopCh`/`stopOnce`/`Stop()` shutdown, same shape as `raft.Raft`'s existing
+  `StopElectionTimer`; (3) `Clerk.NewClerk` seeding `math/rand` from
+  `time.Now().UnixNano()`, which let two `Clerk`s constructed in the same
+  wall-clock nanosecond draw the identical ClientID — corrupting
+  `duplicateTable`'s dedup tracking so one client's write silently no-opped
+  while still reporting `OK`, since the notify channel fires on the proposed
+  op matching regardless of whether the dedup check let the mutation through.
+  Root-caused by tracing one ClientID through debug output and finding it
+  shared across two different clients' Propose calls; fixed by drawing
+  ClientID from `crypto/rand` instead. 25/25 clean stress runs and 10/10 clean
+  full-suite runs under `-race` after the fix.
