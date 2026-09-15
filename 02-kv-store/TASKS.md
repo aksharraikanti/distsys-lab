@@ -20,7 +20,7 @@ tested — "read about it" isn't done.
       commitIndex to advance," since a proposed entry can be overwritten by a
       later leader before it ever commits), and replies with the result or an
       explicit "not leader" error so the client knows to retry elsewhere.
-- [ ] **Day 3 — Duplicate request detection.** Client ID + monotonic sequence
+- [x] **Day 3 — Duplicate request detection.** Client ID + monotonic sequence
       number per client, tracked in the state machine itself (so it survives
       snapshots later). A client retries a request whenever it can't tell if
       its last one succeeded (timeout, leader change) — without this, a

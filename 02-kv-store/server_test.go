@@ -55,10 +55,10 @@ func TestApplyLoopAppliesPutAndAppend(t *testing.T) {
 
 	kv := NewKVServer(rf)
 
-	if _, _, ok := rf.Propose(Op{Type: "Put", Key: "x", Value: "1"}); !ok {
+	if _, _, ok := rf.Propose(Op{Type: "Put", Key: "x", Value: "1", ClientID: 1, SeqNum: 1}); !ok {
 		t.Fatal("Propose(Put) should succeed on the leader")
 	}
-	if _, _, ok := rf.Propose(Op{Type: "Append", Key: "x", Value: "-more"}); !ok {
+	if _, _, ok := rf.Propose(Op{Type: "Append", Key: "x", Value: "-more", ClientID: 1, SeqNum: 2}); !ok {
 		t.Fatal("Propose(Append) should succeed on the leader")
 	}
 
@@ -86,8 +86,9 @@ func TestApplyLoopPreservesCommitOrder(t *testing.T) {
 
 	kv := NewKVServer(rf)
 
-	for _, part := range []string{"a", "b", "c", "d"} {
-		if _, _, ok := rf.Propose(Op{Type: "Append", Key: "seq", Value: part}); !ok {
+	for i, part := range []string{"a", "b", "c", "d"} {
+		op := Op{Type: "Append", Key: "seq", Value: part, ClientID: 1, SeqNum: int64(i + 1)}
+		if _, _, ok := rf.Propose(op); !ok {
 			t.Fatalf("Propose(Append %q) should succeed", part)
 		}
 	}
@@ -151,10 +152,10 @@ func TestKVStoreConvergesAcrossCluster(t *testing.T) {
 		return leaders == 1
 	})
 
-	if _, _, ok := nodes[leaderID].Propose(Op{Type: "Put", Key: "x", Value: "1"}); !ok {
+	if _, _, ok := nodes[leaderID].Propose(Op{Type: "Put", Key: "x", Value: "1", ClientID: 1, SeqNum: 1}); !ok {
 		t.Fatal("Propose(Put) should succeed on the leader")
 	}
-	if _, _, ok := nodes[leaderID].Propose(Op{Type: "Append", Key: "x", Value: "-more"}); !ok {
+	if _, _, ok := nodes[leaderID].Propose(Op{Type: "Append", Key: "x", Value: "-more", ClientID: 1, SeqNum: 2}); !ok {
 		t.Fatal("Propose(Append) should succeed on the leader")
 	}
 
@@ -182,7 +183,7 @@ func TestOpGobRegistrationRoundTrips(t *testing.T) {
 	if err := rf.BecomeLeader(); err != nil {
 		t.Fatalf("BecomeLeader: %v", err)
 	}
-	if _, _, ok := rf.Propose(Op{Type: "Put", Key: "x", Value: "1"}); !ok {
+	if _, _, ok := rf.Propose(Op{Type: "Put", Key: "x", Value: "1", ClientID: 1, SeqNum: 1}); !ok {
 		t.Fatal("Propose should succeed")
 	}
 

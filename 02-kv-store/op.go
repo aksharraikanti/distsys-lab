@@ -11,10 +11,24 @@ import "encoding/gob"
 // interface{}). Get is deliberately not represented here: it doesn't
 // mutate state, so Day 1 has no reason to log it (whether reads should
 // also go through Raft, for linearizability, is a later day's decision).
+//
+// ClientID/SeqNum (Day 3) identify which logical client request this Op
+// came from. A client that can't tell whether its last request actually
+// succeeded (a timeout, a leader change) retries by sending the SAME
+// ClientID+SeqNum again — the retry gets its own new log index (Raft has
+// no idea it's a retry), but the state machine recognizes the SeqNum has
+// already been applied and skips re-applying its effect. SeqNum must
+// start at 1 and increase strictly per new logical request from a given
+// client; 0 is never a valid in-use value, since it's Go's zero value and
+// treating it as valid would make every never-set Op collide with
+// "already applied."
 type Op struct {
 	Type  string // "Put" or "Append"
 	Key   string
 	Value string
+
+	ClientID int64
+	SeqNum   int64
 }
 
 func init() {

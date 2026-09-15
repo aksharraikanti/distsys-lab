@@ -71,6 +71,43 @@ _(fill this in as you learn — one section per day, in your own words.)_
   follow-up rather than folded into this PR — it's not Day 2's bug to fix, and
   bundling an unrelated Stage 1 fix into a Stage 2 PR would muddy both.
 
+### Day 3 — Duplicate request detection
+- Adding `ClientID`/`SeqNum` to `Op` broke roughly a dozen existing test call
+  sites in a way that was easy to predict once I thought about it but easy to
+  miss otherwise: Go's zero value for an unset `SeqNum` is `0`, and
+  `duplicateTable[clientID]` also defaults to `0` for a never-seen client — so
+  `0 > 0` is false, meaning every OLD `Op{}`/`PutAppendArgs{}` literal that
+  didn't set `SeqNum` would have its effect silently skipped by the new dedup
+  check. The fix was updating every call site with a real `SeqNum` starting at
+  1, not adding a `SeqNum == 0` bypass — a bypass would have been a genuine
+  loophole (any buggy or malicious client could send `SeqNum: 0` forever and
+  dodge dedup entirely), and real client libraries this project is modeled on
+  never allow that escape hatch either.
+- The dedup table lives in the applyLoop/state machine, not the RPC handler
+  layer, and that placement is load-bearing, not a style choice: every replica
+  applies the identical committed log in the identical order, so every replica
+  computes the SAME answer to "have I already applied this SeqNum" — the
+  dedup decision itself is replicated and consistent, not a per-node guess
+  that could disagree across the cluster. Putting it in the RPC layer instead
+  would have made "is this a duplicate" a question each node answers
+  independently from its own possibly-stale view, which defeats the purpose.
+- `applyLoop` still notifies the index's waiter even when the dedup check
+  skips the actual mutation — this is the detail that makes retries behave
+  correctly from the CLIENT's point of view. The retry's own RPC call
+  registered its own notify channel at its own (new) log index; that call
+  still needs its own reply, even though the underlying Put/Append effect
+  already happened via the original attempt. Skipping the notify here would
+  leave the retrying caller hanging until `commitTimeout`, reporting a
+  timeout for an operation that had actually already succeeded.
+- `TestStaleRetryAfterNewerRequestSuppressed` is the test that actually
+  distinguishes a correct implementation from a plausible-looking wrong one:
+  using `!=` or `==` instead of strict `>` in the dedup comparison would pass
+  every OTHER test in this file, since none of them exercise a stale request
+  arriving AFTER a newer one from the same client already applied. Only `>`
+  correctly treats "older than what I've already seen" as still a duplicate,
+  regardless of whether its SeqNum happens to differ from the current
+  high-water mark.
+
 _(continue per day)_
 
 ## Reference material

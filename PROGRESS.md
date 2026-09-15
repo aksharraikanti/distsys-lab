@@ -1,9 +1,9 @@
 # Progress
 
 Current stage: **02-kv-store**
-Current day: **Day 3 — Duplicate request detection** (next up)
+Current day: **Day 4 — Leader-change correctness** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
-Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-2 complete.
+Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-3 complete.
 
 ## Log
 
@@ -117,3 +117,22 @@ Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-2 complete.
   ~13%-flaky pre-existing Stage 1 test (`TestHeartbeatsKeepLeaderStable`)
   under real CPU contention from both packages' test suites running
   together — flagged as a separate follow-up task, not folded into this PR.
+- 2026-09-15 — Fixed the flagged Stage 1 flakiness directly (not part of
+  either stage's TASKS.md — a standalone reliability fix): widened
+  `ElectionTimeoutMin`/`Max` from 10x/50x `HeartbeatInterval` to 20x/100x, and
+  tightened `TestResetElectionTimerPreventsTimeout`'s own reset-ticker margin.
+  Reduced local dual-package-contention flakiness from ~13% to ~4% across
+  repeated stress runs; not fully eliminated (true elimination would need a
+  fake-clock rewrite disproportionate to a reliability fix), and CI itself has
+  never shown this across 15+ real PR runs.
+- 2026-09-15 — Day 3 (Duplicate request detection) complete: `Op` gained
+  `ClientID`/`SeqNum`, and `applyLoop`'s dedup check (`op.SeqNum >
+  duplicateTable[op.ClientID]`) lives in the state machine itself, not the RPC
+  layer, so every replica computes the identical dedup decision from the
+  identical committed log. Adding the fields broke ~12 existing test call
+  sites whose unset `SeqNum` defaulted to Go's zero value (0), which the new
+  check would treat as an already-seen duplicate — fixed by giving every call
+  site a real `SeqNum` starting at 1, not a `SeqNum == 0` bypass (a real
+  dedup-evading loophole). `TestStaleRetryAfterNewerRequestSuppressed` proves
+  the comparison must be strict `>`, not `!=`/`==` — a subtly wrong version
+  would pass every other test in the file.
