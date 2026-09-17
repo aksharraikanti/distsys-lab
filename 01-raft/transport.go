@@ -7,6 +7,7 @@ package raft
 type RPCHandler interface {
 	RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error
 	AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error
+	InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) error
 }
 
 // Transport abstracts how a Raft node reaches its peers. NetTransport
@@ -18,4 +19,5 @@ type RPCHandler interface {
 type Transport interface {
 	CallRequestVote(peer int, args *RequestVoteArgs, reply *RequestVoteReply) error
 	CallAppendEntries(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) error
+	CallInstallSnapshot(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) error
 }

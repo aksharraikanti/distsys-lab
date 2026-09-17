@@ -47,14 +47,12 @@ func (r *Raft) replicate() {
 // system — same situation Day 7's append logic was in before this day
 // wired a real caller up to it.
 //
-// Day 6 adds one more thing replicateToPeer has to know about: a peer
+// Day 6 added one more thing replicateToPeer has to know about: a peer
 // whose nextIndex has fallen at or below lastIncludedIndex needs
 // entries this node no longer has — they were compacted into a
-// snapshot. Sending AppendEntries with a PrevLogIndex this node can't
-// even look up itself would be pointless (it can only ever reject).
-// Until Day 7's InstallSnapshot RPC exists to actually catch such a
-// peer up, this function just skips it for the round rather than send
-// a call that can't succeed — a documented gap, not a silent one.
+// snapshot. Day 7 closes that gap for real: such a peer gets
+// sendInstallSnapshot instead of an AppendEntries this node could never
+// even construct a valid PrevLogIndex for.
 func (r *Raft) replicateToPeer(peer int) {
 	r.mu.Lock()
 	if r.state != Leader {
@@ -64,6 +62,7 @@ func (r *Raft) replicateToPeer(peer int) {
 	next := r.nextIndex[peer]
 	if next <= r.lastIncludedIndex {
 		r.mu.Unlock()
+		r.sendInstallSnapshot(peer)
 		return
 	}
 	term := r.currentTerm
@@ -121,4 +120,60 @@ func (r *Raft) replicateToPeer(peer int) {
 	if r.nextIndex[peer] > 1 {
 		r.nextIndex[peer]--
 	}
+}
+
+// sendInstallSnapshot sends this node's current snapshot to peer, for
+// the one case AppendEntries can never resolve on its own: peer's
+// nextIndex has fallen at or below lastIncludedIndex, meaning the
+// entries it needs no longer exist in this node's log. Reads
+// snapshotData directly (the in-memory copy every node keeps regardless
+// of persister — see its doc comment on the Raft struct) rather than
+// the persister, since a persister-less leader still needs to be able
+// to serve this.
+func (r *Raft) sendInstallSnapshot(peer int) {
+	r.mu.Lock()
+	if r.state != Leader {
+		r.mu.Unlock()
+		return
+	}
+	term := r.currentTerm
+	leaderID := r.id
+	lastIncludedIndex := r.lastIncludedIndex
+	lastIncludedTerm := r.lastIncludedTerm
+	data := append([]byte(nil), r.snapshotData...)
+	r.mu.Unlock()
+
+	args := &InstallSnapshotArgs{
+		Term:              term,
+		LeaderID:          leaderID,
+		LastIncludedIndex: lastIncludedIndex,
+		LastIncludedTerm:  lastIncludedTerm,
+		Data:              data,
+	}
+	var reply InstallSnapshotReply
+	if err := r.transport.CallInstallSnapshot(peer, args, &reply); err != nil {
+		return // unreachable peer — the next tick will retry
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if reply.Term > r.currentTerm {
+		r.becomeFollowerLocked(reply.Term)
+		return
+	}
+	if r.state != Leader || r.currentTerm != term {
+		return // no longer leader of the term this reply belongs to
+	}
+
+	// The follower now has everything through lastIncludedIndex —
+	// resume ordinary AppendEntries replication right after it,
+	// exactly as a successful AppendEntries reply would advance these.
+	if lastIncludedIndex > r.matchIndex[peer] {
+		r.matchIndex[peer] = lastIncludedIndex
+	}
+	if lastIncludedIndex+1 > r.nextIndex[peer] {
+		r.nextIndex[peer] = lastIncludedIndex + 1
+	}
+	r.advanceCommitIndexLocked()
 }

@@ -14,7 +14,9 @@ import (
 // pieces need to actually work together) and returns each node's Raft
 // handle, its KVServer, the shared transport (needed by tests that
 // inject faults), and a cleanup func. Shared by every test below.
-func newTestCluster(n int) (nodes map[int]*raft.Raft, kvs []*KVServer, transport *raft.FakeTransport, cleanup func()) {
+// maxRaftState is passed straight through to each NewKVServer — -1
+// (what every pre-Day-6 test here still passes) disables snapshotting.
+func newTestCluster(n int, maxRaftState int) (nodes map[int]*raft.Raft, kvs []*KVServer, transport *raft.FakeTransport, cleanup func()) {
 	transport = raft.NewFakeTransport()
 	ids := make([]int, n)
 	for i := range ids {
@@ -26,7 +28,7 @@ func newTestCluster(n int) (nodes map[int]*raft.Raft, kvs []*KVServer, transport
 		rf := raft.NewRaft(id, otherPeers(ids, id), transport)
 		nodes[id] = rf
 		transport.Register(id, rf)
-		kvs[id] = NewKVServer(rf, -1)
+		kvs[id] = NewKVServer(rf, maxRaftState)
 	}
 	for _, rf := range nodes {
 		go rf.RunElectionTimer()
@@ -48,7 +50,7 @@ func newTestCluster(n int) (nodes map[int]*raft.Raft, kvs []*KVServer, transport
 // throwing concurrency or faults at it: it doesn't know which of 3 nodes
 // is leader, and Put/Append/Get must still all round-trip correctly.
 func TestClerkPutAppendGetRoundTrip(t *testing.T) {
-	nodes, kvs, _, cleanup := newTestCluster(3)
+	nodes, kvs, _, cleanup := newTestCluster(3, -1)
 	defer cleanup()
 	waitForSingleLeader(t, nodes, 20*raft.ElectionTimeoutMax)
 
@@ -73,7 +75,7 @@ func TestConcurrentClientsNoFaults(t *testing.T) {
 	const numClients = 6
 	const opsPerClient = 25
 
-	nodes, kvs, _, cleanup := newTestCluster(3)
+	nodes, kvs, _, cleanup := newTestCluster(3, -1)
 	defer cleanup()
 	waitForSingleLeader(t, nodes, 20*raft.ElectionTimeoutMax)
 
@@ -126,7 +128,7 @@ func TestConcurrentClientsWithFaultInjection(t *testing.T) {
 	const numClients = 4
 	const opsPerClient = 15
 
-	nodes, kvs, transport, cleanup := newTestCluster(3)
+	nodes, kvs, transport, cleanup := newTestCluster(3, -1)
 	defer cleanup()
 	waitForSingleLeader(t, nodes, 20*raft.ElectionTimeoutMax)
 

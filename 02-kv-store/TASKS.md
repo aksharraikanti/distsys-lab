@@ -53,11 +53,22 @@ tested — "read about it" isn't done.
       entries after the most recent compaction, and `Persister` gained a
       second, independently-stored blob for the opaque snapshot bytes
       alongside the existing term/votedFor/log.
-- [ ] **Day 7 — InstallSnapshot RPC.** A new Raft RPC (extending 01-raft) for
+- [x] **Day 7 — InstallSnapshot RPC.** A new Raft RPC (extending 01-raft) for
       the case Day 6 creates: a follower that's fallen far enough behind that
       the leader has already discarded the log entries it needs. Instead of
       rejecting forever, the leader sends a full snapshot instead — the
       follower installs it and catches up from there via normal replication.
+      Surfaced a real cross-goroutine ordering bug along the way: a naive
+      "InstallSnapshot sends straight to ApplyCh" implementation lets a
+      regular committed entry and an installed snapshot race each other onto
+      that channel from two different goroutines, in either order. Fixed by
+      routing snapshot delivery through the same single apply-loop goroutine
+      that already delivers every regular entry, so ApplyCh only ever has one
+      sender. Also caught (via a real 3-node fault-injection test, not just
+      unit tests) that `Snapshot`'s own documented precondition — "the state
+      machine has already applied through index" — was never actually
+      enforced, which could silently corrupt the log under the right timing;
+      added the missing check.
 - [ ] **Day 8 — Full integration.** Fault injection (crashes, partitions,
       restarts) combined with concurrent clients AND snapshotting all running
       at once — the fullest test this stage can produce, proving the pieces

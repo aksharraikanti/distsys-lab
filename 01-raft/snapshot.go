@@ -66,12 +66,16 @@ func (r *Raft) RaftStateSize() int {
 // entry itself), and persist the result.
 //
 // A stale call (index already at or below lastIncludedIndex — e.g. a
-// slow caller racing a newer compaction, or, once Day 7 exists, a
-// just-installed snapshot from a leader) is not an error: it's a no-op,
-// since this node has already compacted at least that far. An index
-// past this node's own log is a genuine misuse — the caller claims to
-// have applied something this node never even logged — and is reported
-// as an error rather than silently ignored or clamped.
+// slow caller racing a newer compaction, or a just-installed snapshot
+// from a leader, Day 7) is not an error: it's a no-op, since this node
+// has already compacted at least that far. An index past this node's
+// own log, OR past what it has actually applied so far, is a genuine
+// misuse of the "I've already applied through index" contract this
+// method's whole safety case rests on — Raft trusts the caller's claim
+// rather than re-deriving it, so a caller that lies (even accidentally,
+// racing its own apply loop) would otherwise silently discard entries
+// nobody has consumed yet. Both are reported as errors rather than
+// silently ignored or clamped.
 func (r *Raft) Snapshot(index int, data []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -83,6 +87,9 @@ func (r *Raft) Snapshot(index int, data []byte) error {
 	if index > lastLogIndex {
 		return fmt.Errorf("raft: cannot snapshot through index %d, past this node's last log index %d", index, lastLogIndex)
 	}
+	if index > r.lastApplied {
+		return fmt.Errorf("raft: cannot snapshot through index %d, this node has only applied through index %d", index, r.lastApplied)
+	}
 
 	// termAtLocked/physicalIndexLocked both read lastIncludedIndex, so
 	// this MUST run before that field is overwritten below.
@@ -91,6 +98,7 @@ func (r *Raft) Snapshot(index int, data []byte) error {
 	r.log = append([]LogEntry(nil), r.log[physIdx+1:]...)
 	r.lastIncludedIndex = index
 	r.lastIncludedTerm = term
+	r.snapshotData = append([]byte(nil), data...)
 
 	if r.persister != nil {
 		if err := r.persister.SaveStateAndSnapshot(r.encodeStateLocked(), data); err != nil {
@@ -100,24 +108,17 @@ func (r *Raft) Snapshot(index int, data []byte) error {
 	return nil
 }
 
-// ReadSnapshot returns whatever snapshot bytes this node currently has
-// persisted, or nil if it has none (no persister attached, or a
-// persister that's never had one saved). A state machine calls this
-// once, at construction, to recover state a plain ApplyCh replay can no
-// longer provide on its own: once Snapshot has trimmed the log, the
-// entries through lastIncludedIndex are gone for good — the ONLY
+// ReadSnapshot returns this node's current snapshot bytes, or nil if it
+// has none — regardless of whether a persister is attached (see
+// snapshotData's doc comment on the Raft struct). A state machine calls
+// this once, at construction, to recover state a plain ApplyCh replay
+// can no longer provide on its own: once Snapshot has trimmed the log,
+// the entries through lastIncludedIndex are gone for good — the ONLY
 // remaining record of what they did is this snapshot, so a state
 // machine that skips this step silently starts from an incomplete
 // state after any restart that follows a snapshot.
 func (r *Raft) ReadSnapshot() []byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.persister == nil {
-		return nil
-	}
-	data, err := r.persister.ReadSnapshot()
-	if err != nil {
-		panic(fmt.Sprintf("raft: failed to read persisted snapshot: %v", err))
-	}
-	return data
+	return append([]byte(nil), r.snapshotData...)
 }

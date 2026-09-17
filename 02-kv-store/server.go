@@ -147,9 +147,14 @@ func (kv *KVServer) Stop() {
 }
 
 // restoreSnapshot decodes data (as produced by snapshotLocked) and
-// adopts it as this KVServer's entire state. Called only from
-// NewKVServer, before applyLoop starts — no lock needed yet, since
-// nothing else can be touching kv.store/duplicateTable this early.
+// adopts it as this KVServer's entire state — wholesale replacing
+// whatever store/duplicateTable held before, not merging into it.
+// Called from two places: NewKVServer, before applyLoop starts (no
+// lock needed there — nothing else can be touching kv.store/
+// duplicateTable that early), and applyLoop itself (Day 7), when this
+// node's underlying Raft node just installed a snapshot from a leader
+// (msg.SnapshotValid) — that call happens under kv.mu, since real
+// concurrent Get/PutAppend traffic can be in flight by then.
 func (kv *KVServer) restoreSnapshot(data []byte) {
 	var snap kvSnapshot
 	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&snap); err != nil {
@@ -182,6 +187,17 @@ func (kv *KVServer) snapshotLocked(index int) {
 // is still notified: the RETRY's own RPC call still needs its own reply,
 // even though the mutation it asked for already happened via an earlier
 // attempt.
+//
+// Since Day 7, a message can also be a just-installed snapshot
+// (msg.SnapshotValid) rather than a regular committed entry — this
+// node's underlying Raft node fell far enough behind that the leader
+// sent its whole compacted state instead of individual entries. That
+// case is handled first and separately: it replaces store/
+// duplicateTable wholesale rather than applying one Op. Nothing extra
+// is needed for any notifyChans this node might still be holding for
+// now-compacted indices — a stale wait there just never fires, which
+// PutAppend's own leaderCheck ticker already handles independently
+// (Day 4), the same way it handles any other loss of leadership.
 func (kv *KVServer) applyLoop() {
 	for {
 		var msg raft.ApplyMsg
@@ -189,6 +205,13 @@ func (kv *KVServer) applyLoop() {
 		case <-kv.stopCh:
 			return
 		case msg = <-kv.rf.ApplyCh:
+		}
+
+		if msg.SnapshotValid {
+			kv.mu.Lock()
+			kv.restoreSnapshot(msg.Snapshot)
+			kv.mu.Unlock()
+			continue
 		}
 
 		op, ok := msg.Command.(Op)

@@ -125,3 +125,14 @@ func (t *FakeTransport) CallAppendEntries(peer int, args *AppendEntriesArgs, rep
 	}
 	return h.AppendEntries(args, reply)
 }
+
+func (t *FakeTransport) CallInstallSnapshot(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) error {
+	if !t.reachable(args.LeaderID, peer) {
+		return fmt.Errorf("raft: no route from %d to %d (partitioned)", args.LeaderID, peer)
+	}
+	h, err := t.handlerFor(peer)
+	if err != nil {
+		return err
+	}
+	return h.InstallSnapshot(args, reply)
+}
