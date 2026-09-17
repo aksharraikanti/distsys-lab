@@ -3,21 +3,21 @@ package raft
 import "sync"
 
 // lastLogInfoLocked returns the index and term of the node's last log
-// entry, or (0, 0) if the log is empty — the sentinel values the Raft
-// paper uses for "nothing here yet." Entries are 1-indexed (index 0 is
-// the sentinel), so the last entry's index is simply the log's length.
-//
-// The log stays empty through Day 6 (entries arrive Day 7), so every
-// node's log is trivially "equally up to date" for now — but the
-// comparison in candidateLogIsUpToDateLocked is written against the
-// general rule from day one rather than a Day-4-only special case, so
-// nothing has to change here once Day 7 starts appending entries.
+// entry, or (lastIncludedIndex, lastIncludedTerm) if r.log is empty —
+// "nothing here yet" before Day 6 ever existed (0, 0, the Raft paper's
+// own sentinel for an empty log), and after Day 6 it means "everything
+// through lastIncludedIndex was compacted into a snapshot, and nothing
+// has been appended since" — lastIncludedIndex/Term describe the entry
+// that snapshot replaced, so they're exactly the right stand-in index/
+// term. Entries are 1-indexed (absolute index 0 is the sentinel), and
+// r.log only holds entries AFTER lastIncludedIndex, so the last entry's
+// absolute index is lastIncludedIndex + the physical log's length.
 func (r *Raft) lastLogInfoLocked() (index, term int) {
 	if len(r.log) == 0 {
-		return 0, 0
+		return r.lastIncludedIndex, r.lastIncludedTerm
 	}
 	last := r.log[len(r.log)-1]
-	return len(r.log), last.Term
+	return r.lastIncludedIndex + len(r.log), last.Term
 }
 
 // candidateLogIsUpToDateLocked implements the Raft paper's §5.4.1

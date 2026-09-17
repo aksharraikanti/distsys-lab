@@ -383,3 +383,11 @@ _(continue per day)_
 ## Status
 
 See [TASKS.md](TASKS.md) for the day-by-day checklist and [../PROGRESS.md](../PROGRESS.md) for where things stand right now.
+
+Post-completion note: log compaction (lastIncludedIndex/Term,
+`Snapshot`/`ReadSnapshot`/`RaftStateSize`, and the matching `Persister`
+extension) was added after Stage 1 itself was done, driven by Stage 2
+Day 6's snapshotting needs — see
+[`02-kv-store/README.md`](../02-kv-store/README.md)'s Day 6 notes for
+the narrative. It's real Raft-layer functionality, not KV-store-specific,
+which is why it lives here rather than in Stage 2's own package.

@@ -73,7 +73,7 @@ func TestApplyLoopAppliesPutAndAppend(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
 	if _, _, ok := rf.Propose(Op{Type: "Put", Key: "x", Value: "1", ClientID: 1, SeqNum: 1}); !ok {
@@ -105,7 +105,7 @@ func TestApplyLoopPreservesCommitOrder(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
 	for i, part := range []string{"a", "b", "c", "d"} {
@@ -128,7 +128,7 @@ func TestGetReturnsFalseForMissingKey(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 	if v, ok := kv.get("nope"); ok || v != "" {
 		t.Fatalf("Get(missing key) = (%q, %v), want (\"\", false)", v, ok)
@@ -150,7 +150,7 @@ func TestKVStoreConvergesAcrossCluster(t *testing.T) {
 		rf := raft.NewRaft(id, otherPeers(ids, id), transport)
 		nodes[id] = rf
 		transport.Register(id, rf)
-		kvs[id] = NewKVServer(rf)
+		kvs[id] = NewKVServer(rf, -1)
 	}
 	for _, rf := range nodes {
 		go rf.RunElectionTimer()

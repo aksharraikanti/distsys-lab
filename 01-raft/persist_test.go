@@ -35,6 +35,43 @@ func TestMemoryPersisterRoundTrips(t *testing.T) {
 	}
 }
 
+// TestMemoryPersisterSnapshotRoundTrips proves SaveStateAndSnapshot's
+// snapshot half round-trips independently of SaveState's own state
+// blob — the two are stored (and read back) separately, not folded
+// together.
+func TestMemoryPersisterSnapshotRoundTrips(t *testing.T) {
+	p := NewMemoryPersister()
+
+	snap, err := p.ReadSnapshot()
+	if err != nil {
+		t.Fatalf("ReadSnapshot on a never-written persister: %v", err)
+	}
+	if len(snap) != 0 {
+		t.Fatalf("ReadSnapshot on a never-written persister = %v, want empty", snap)
+	}
+
+	wantState := []byte("state-blob")
+	wantSnapshot := []byte("snapshot-blob")
+	if err := p.SaveStateAndSnapshot(wantState, wantSnapshot); err != nil {
+		t.Fatalf("SaveStateAndSnapshot: %v", err)
+	}
+
+	gotState, err := p.ReadState()
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if !reflect.DeepEqual(gotState, wantState) {
+		t.Fatalf("ReadState = %v, want %v", gotState, wantState)
+	}
+	gotSnapshot, err := p.ReadSnapshot()
+	if err != nil {
+		t.Fatalf("ReadSnapshot: %v", err)
+	}
+	if !reflect.DeepEqual(gotSnapshot, wantSnapshot) {
+		t.Fatalf("ReadSnapshot = %v, want %v", gotSnapshot, wantSnapshot)
+	}
+}
+
 // TestFilePersisterRoundTrips is the same proof against a real file on
 // disk — including that a second SaveState correctly overwrites the
 // first (the atomic-rename path, not just the initial write).
@@ -72,6 +109,46 @@ func TestFilePersisterRoundTrips(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("directory has %d entries after 2 saves, want exactly 1 (no leftover temp files): %v", len(entries), entries)
+	}
+}
+
+// TestFilePersisterSnapshotRoundTrips is the on-disk equivalent of
+// TestMemoryPersisterSnapshotRoundTrips: SaveStateAndSnapshot writes
+// both blobs to separate files (state.bin and state.bin.snapshot), and
+// each reads back independently, with no leftover temp files from
+// either write.
+func TestFilePersisterSnapshotRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	p := NewFilePersister(filepath.Join(dir, "state.bin"))
+
+	if err := p.SaveState([]byte("plain state, no snapshot yet")); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	if err := p.SaveStateAndSnapshot([]byte("state-with-snapshot"), []byte("snapshot-bytes")); err != nil {
+		t.Fatalf("SaveStateAndSnapshot: %v", err)
+	}
+
+	gotState, err := p.ReadState()
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if string(gotState) != "state-with-snapshot" {
+		t.Fatalf("ReadState = %q, want %q", gotState, "state-with-snapshot")
+	}
+	gotSnapshot, err := p.ReadSnapshot()
+	if err != nil {
+		t.Fatalf("ReadSnapshot: %v", err)
+	}
+	if string(gotSnapshot) != "snapshot-bytes" {
+		t.Fatalf("ReadSnapshot = %q, want %q", gotSnapshot, "snapshot-bytes")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("directory has %d entries after SaveState + SaveStateAndSnapshot, want exactly 2 (state.bin, state.bin.snapshot — no leftover temp files): %v", len(entries), entries)
 	}
 }
 

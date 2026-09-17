@@ -49,7 +49,8 @@ func (r *Raft) advanceCommitIndexLocked() {
 	// which at least `majority` servers have matchIndex >= N.
 	candidate := matches[majority-1]
 
-	if candidate > r.commitIndex && candidate >= 1 && candidate <= len(r.log) && r.log[candidate-1].Term == r.currentTerm {
+	term, ok := r.termAtLocked(candidate)
+	if candidate > r.commitIndex && candidate >= 1 && candidate <= lastIndex && ok && term == r.currentTerm {
 		r.commitIndex = candidate
 	}
 }

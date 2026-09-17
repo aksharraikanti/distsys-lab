@@ -24,5 +24,8 @@ func (r *Raft) Propose(command interface{}) (index int, term int, isLeader bool)
 	r.log = append(r.log, LogEntry{Term: r.currentTerm, Command: command})
 	r.persistLocked()
 	r.advanceCommitIndexLocked()
-	return len(r.log), r.currentTerm, true // 1-indexed, matching lastLogInfoLocked
+	// Absolute (paper-style) index, matching lastLogInfoLocked — NOT
+	// len(r.log) on its own once a snapshot has advanced
+	// lastIncludedIndex (Day 6).
+	return r.lastIncludedIndex + len(r.log), r.currentTerm, true
 }

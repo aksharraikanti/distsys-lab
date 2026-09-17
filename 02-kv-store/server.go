@@ -1,6 +1,8 @@
 package kvstore
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"sync"
 	"time"
@@ -56,9 +58,20 @@ type KVServer struct {
 	// the identical answer to "have I seen this one before," which is
 	// what makes the dedup decision itself replicated and consistent
 	// rather than a per-node guess. Living in the state machine is also
-	// what will let this table survive a snapshot later (Day 6) instead
-	// of being lost the moment the log gets compacted.
+	// what lets this table survive a snapshot (Day 6): it's serialized
+	// into the snapshot right alongside store, so a node that restores
+	// from one doesn't forget which requests it's already seen.
 	duplicateTable map[int64]int64
+
+	// maxRaftState bounds how large rf's persisted currentTerm/votedFor/
+	// log (raft.Raft.RaftStateSize) is allowed to grow before applyLoop
+	// snapshots — the Raft log otherwise grows forever, since nothing
+	// before Day 6 ever consumed committed entries into compactable
+	// state. -1 disables snapshotting entirely, which is what every
+	// pre-Day-6 test still wants: it isn't testing compaction, and
+	// wiring a threshold into it would risk snapshotting mid-assertion
+	// for no reason relevant to what it's actually checking.
+	maxRaftState int
 
 	// stopCh/stopOnce shut down applyLoop and noopLoop. Day 5's own
 	// stress test is what surfaced why this needs to be real rather
@@ -76,19 +89,48 @@ type KVServer struct {
 	stopOnce sync.Once
 }
 
+// kvSnapshot is everything a KVServer needs to fully reconstruct its
+// state without replaying a single log entry: the store itself AND the
+// dedup table, serialized together so they're always restored as of
+// the exact same point — restoring one without the other would let a
+// request that landed right at the snapshot boundary either double-
+// apply or get incorrectly treated as already-seen. Passed to Raft as
+// the opaque data argument to Snapshot/delivered back via ReadSnapshot;
+// Raft itself never looks inside it.
+type kvSnapshot struct {
+	Store          map[string]string
+	DuplicateTable map[int64]int64
+}
+
 // NewKVServer wraps rf and starts the apply loop that keeps this node's
 // store in sync with its Raft log. The caller is still responsible for
 // starting rf's own background loops (RunElectionTimer, RunHeartbeats,
 // RunApplyLoop) — NewKVServer only starts its own consumers of
 // rf.ApplyCh and rf.State(), which those loops feed. Call Stop when
 // done with this KVServer to shut those consumers down.
-func NewKVServer(rf *raft.Raft) *KVServer {
+//
+// maxRaftState is the size threshold (in bytes of rf's persisted state)
+// that triggers a snapshot — see the maxRaftState field doc. Pass -1 to
+// disable snapshotting.
+//
+// If rf already has a snapshot persisted (this node is restarting, not
+// booting fresh — see restoreSnapshot), NewKVServer restores store and
+// duplicateTable from it before starting applyLoop. This is NOT
+// optional once snapshotting is in play: Snapshot has already discarded
+// every log entry through the snapshot's index, so those entries can
+// never arrive on ApplyCh again — the snapshot is the only remaining
+// record of what they did.
+func NewKVServer(rf *raft.Raft, maxRaftState int) *KVServer {
 	kv := &KVServer{
 		rf:             rf,
 		store:          make(map[string]string),
 		notifyChans:    make(map[int]chan Op),
 		duplicateTable: make(map[int64]int64),
+		maxRaftState:   maxRaftState,
 		stopCh:         make(chan struct{}),
+	}
+	if data := rf.ReadSnapshot(); len(data) > 0 {
+		kv.restoreSnapshot(data)
 	}
 	go kv.applyLoop()
 	go kv.noopLoop()
@@ -102,6 +144,34 @@ func (kv *KVServer) Stop() {
 	kv.stopOnce.Do(func() {
 		close(kv.stopCh)
 	})
+}
+
+// restoreSnapshot decodes data (as produced by snapshotLocked) and
+// adopts it as this KVServer's entire state. Called only from
+// NewKVServer, before applyLoop starts — no lock needed yet, since
+// nothing else can be touching kv.store/duplicateTable this early.
+func (kv *KVServer) restoreSnapshot(data []byte) {
+	var snap kvSnapshot
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&snap); err != nil {
+		panic(fmt.Sprintf("kvstore: failed to decode persisted snapshot: %v", err))
+	}
+	kv.store = snap.Store
+	kv.duplicateTable = snap.DuplicateTable
+}
+
+// snapshotLocked serializes the current store+duplicateTable and hands
+// the result to Raft along with index — the log index this state
+// reflects, i.e. every entry through index has already been applied —
+// so Raft can discard its own log through that point. Caller must hold
+// kv.mu, since it reads store/duplicateTable directly.
+func (kv *KVServer) snapshotLocked(index int) {
+	buf := new(bytes.Buffer)
+	if err := gob.NewEncoder(buf).Encode(kvSnapshot{Store: kv.store, DuplicateTable: kv.duplicateTable}); err != nil {
+		panic(fmt.Sprintf("kvstore: failed to encode snapshot: %v", err))
+	}
+	if err := kv.rf.Snapshot(index, buf.Bytes()); err != nil {
+		panic(fmt.Sprintf("kvstore: failed to snapshot through index %d: %v", index, err))
+	}
 }
 
 // applyLoop consumes rf.ApplyCh and applies each committed Put/Append to
@@ -148,6 +218,15 @@ func (kv *KVServer) applyLoop() {
 		if ch, waiting := kv.notifyChans[msg.Index]; waiting {
 			delete(kv.notifyChans, msg.Index)
 			ch <- op
+		}
+		// Checked after every applied entry, not on a separate timer:
+		// RaftStateSize only grows one entry at a time, so there's no
+		// way to overshoot a threshold between checks, and applyLoop
+		// already holds kv.mu with a consistent, just-applied view of
+		// store/duplicateTable right here — the exact state
+		// snapshotLocked needs to serialize.
+		if kv.maxRaftState != -1 && kv.rf.RaftStateSize() >= kv.maxRaftState {
+			kv.snapshotLocked(msg.Index)
 		}
 		kv.mu.Unlock()
 	}

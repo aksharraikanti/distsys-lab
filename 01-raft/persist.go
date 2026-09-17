@@ -7,15 +7,25 @@ import (
 )
 
 // persistedState is exactly the Raft paper's "persistent state on all
-// servers" (Figure 2) — currentTerm, votedFor, and log. Nothing else
-// (state, commitIndex, lastApplied, nextIndex/matchIndex) is persisted:
-// they're all either re-derivable or paper-mandated to reset on restart
-// (a restarted node always comes back as a Follower, regardless of what
-// it was before it crashed).
+// servers" (Figure 2) — currentTerm, votedFor, and log — plus, since
+// Day 6, lastIncludedIndex/lastIncludedTerm: the paper doesn't name
+// these separately because it treats the log as never being compacted,
+// but once Snapshot has trimmed a prefix off r.log, that prefix's last
+// entry has to be remembered right alongside the log itself, or a
+// restart would have no way to know what index/term the (now-shorter)
+// log actually starts after. Nothing else (state, commitIndex,
+// lastApplied, nextIndex/matchIndex) is persisted: they're all either
+// re-derivable or paper-mandated to reset on restart (a restarted node
+// always comes back as a Follower, regardless of what it was before it
+// crashed) — see restoreLocked for the one place lastApplied/commitIndex
+// DO need an explicit bump on restore, despite not being persisted
+// themselves.
 type persistedState struct {
-	CurrentTerm int
-	VotedFor    int
-	Log         []LogEntry
+	CurrentTerm       int
+	VotedFor          int
+	Log               []LogEntry
+	LastIncludedIndex int
+	LastIncludedTerm  int
 }
 
 func init() {
@@ -40,9 +50,11 @@ func init() {
 func (r *Raft) encodeStateLocked() []byte {
 	buf := new(bytes.Buffer)
 	if err := gob.NewEncoder(buf).Encode(persistedState{
-		CurrentTerm: r.currentTerm,
-		VotedFor:    r.votedFor,
-		Log:         r.log,
+		CurrentTerm:       r.currentTerm,
+		VotedFor:          r.votedFor,
+		Log:               r.log,
+		LastIncludedIndex: r.lastIncludedIndex,
+		LastIncludedTerm:  r.lastIncludedTerm,
 	}); err != nil {
 		panic(fmt.Sprintf("raft: failed to encode persistent state: %v", err))
 	}
@@ -91,4 +103,21 @@ func (r *Raft) restoreLocked() {
 	r.currentTerm = state.CurrentTerm
 	r.votedFor = state.VotedFor
 	r.log = state.Log
+	r.lastIncludedIndex = state.LastIncludedIndex
+	r.lastIncludedTerm = state.LastIncludedTerm
+	// commitIndex/lastApplied are volatile and normally start at their
+	// zero value on every restart — re-derived by replaying the log from
+	// the beginning. That stops being true once a snapshot has ever
+	// trimmed a prefix off the log (Day 6): the entries through
+	// lastIncludedIndex are gone for good, so "replay from the
+	// beginning" can only ever start at lastIncludedIndex now, not 0.
+	// Leaving these at 0 here would make applyPending try to apply
+	// index 1 first, which no longer exists in r.log at all — an
+	// out-of-range read, not just a stale one.
+	if r.lastIncludedIndex > r.commitIndex {
+		r.commitIndex = r.lastIncludedIndex
+	}
+	if r.lastIncludedIndex > r.lastApplied {
+		r.lastApplied = r.lastIncludedIndex
+	}
 }

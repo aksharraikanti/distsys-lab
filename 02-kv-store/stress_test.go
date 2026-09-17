@@ -26,7 +26,7 @@ func newTestCluster(n int) (nodes map[int]*raft.Raft, kvs []*KVServer, transport
 		rf := raft.NewRaft(id, otherPeers(ids, id), transport)
 		nodes[id] = rf
 		transport.Register(id, rf)
-		kvs[id] = NewKVServer(rf)
+		kvs[id] = NewKVServer(rf, -1)
 	}
 	for _, rf := range nodes {
 		go rf.RunElectionTimer()

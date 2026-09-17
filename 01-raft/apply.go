@@ -55,11 +55,12 @@ func (r *Raft) applyPending() {
 			return
 		}
 		nextApplied := r.lastApplied + 1
-		if nextApplied > len(r.log) {
+		lastLogIndex := r.lastIncludedIndex + len(r.log)
+		if nextApplied > lastLogIndex {
 			// Defensive, should never trigger: commitIndex is only ever
-			// set to a value <= len(r.log) (advanceCommitIndexLocked and
-			// the follower-side LeaderCommit cap both guarantee this).
-			// But Day 10's log consistency check — the thing that
+			// set to a value <= lastLogIndex (advanceCommitIndexLocked
+			// and the follower-side LeaderCommit cap both guarantee
+			// this). But Day 10's log consistency check — the thing that
 			// actually guarantees a committed entry can never be
 			// truncated out from under it — doesn't exist yet, so this
 			// guard exists to fail safe (skip, don't crash) instead of
@@ -69,7 +70,11 @@ func (r *Raft) applyPending() {
 			return
 		}
 		r.lastApplied = nextApplied
-		entry := r.log[r.lastApplied-1] // 1-indexed
+		// nextApplied > lastIncludedIndex always holds here: Snapshot
+		// (Day 6) only ever compacts through an index the state machine
+		// already confirmed it applied, so lastApplied — and therefore
+		// nextApplied — never falls behind lastIncludedIndex.
+		entry := r.log[r.physicalIndexLocked(nextApplied)]
 		index := r.lastApplied
 		r.mu.Unlock()
 
