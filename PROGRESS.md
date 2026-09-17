@@ -1,9 +1,9 @@
 # Progress
 
 Current stage: **02-kv-store**
-Current day: **Day 7 — InstallSnapshot RPC** (next up)
+Current day: **Day 8 — Full integration** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
-Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-6 complete.
+Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-7 complete.
 
 ## Log
 
@@ -189,3 +189,24 @@ Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-6 complete.
   gap left for Day 7's `InstallSnapshot` RPC — `replicateToPeer` just skips
   that peer for the round rather than send a doomed `AppendEntries`. 15/15
   clean full-suite runs under `-race` after landing.
+- 2026-09-17 — Day 7 (InstallSnapshot RPC) complete: a new Raft RPC that
+  catches up a follower whose `nextIndex` has fallen at or below the
+  leader's `lastIncludedIndex` — `replicateToPeer` now calls
+  `sendInstallSnapshot` for that peer instead of skipping it. Two real bugs
+  found and fixed along the way, both via a full 3-node fault-injection test
+  rather than the unit tests alone: (1) `InstallSnapshot` sent directly on
+  `ApplyCh` from the RPC-handler goroutine, a second sender racing
+  `applyPending`'s own goroutine on the same channel — could deliver a
+  regular entry after a newer snapshot already superseded it. Fixed by
+  queuing the snapshot (`pendingSnapshot`) and having `RunApplyLoop`'s own
+  goroutine deliver it, restoring "exactly one sender." (2) `Snapshot`'s
+  documented precondition ("already applied through index") was never
+  actually checked — a caller snapshotting a moment before `applyPending`
+  caught up could silently corrupt the log; added the missing
+  `index > lastApplied` check. Also gave Raft its own in-memory
+  `snapshotData` field (independent of whether a persister is attached) —
+  the leader-serving-a-peer path has nothing to do with a persister, and the
+  common persister-less case would otherwise send an empty snapshot despite
+  having genuinely compacted its log. `KVServer.applyLoop` now handles
+  `msg.SnapshotValid` by restoring `store`/`duplicateTable` wholesale.
+  20/20 clean full-suite runs under `-race` after landing.

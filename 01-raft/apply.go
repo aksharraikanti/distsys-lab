@@ -2,15 +2,32 @@ package raft
 
 import "time"
 
-// ApplyMsg is what RunApplyLoop delivers on ApplyCh once a log entry has
-// been safely committed — the Raft paper's "apply to the state machine"
-// step. This package only carries the entry to the door; it has no
-// opinion about what's on the other side. Stage 2's fault-tolerant KV
-// store is the natural first consumer.
+// ApplyMsg is what RunApplyLoop (or, since Day 7, InstallSnapshot)
+// delivers on ApplyCh — the Raft paper's "apply to the state machine"
+// step, plus "adopt this snapshot instead." This package only carries
+// the message to the door; it has no opinion about what's on the other
+// side. Stage 2's fault-tolerant KV store is the natural first
+// consumer.
+//
+// Exactly one of CommandValid/SnapshotValid is true on any given
+// message — they're mutually exclusive views of the same channel, the
+// same shape MIT 6.5840's own labs use: a normal committed entry
+// (Index/Term/Command) needs applying one at a time, in order, the way
+// applyPending always has; an installed snapshot (Day 7) needs the
+// state machine to instead discard whatever it has and adopt Snapshot
+// wholesale, since the individual entries it replaces were compacted
+// away before this node ever saw them and will never arrive as
+// CommandValid messages of their own.
 type ApplyMsg struct {
-	Index   int
-	Term    int
-	Command interface{}
+	CommandValid bool
+	Index        int
+	Term         int
+	Command      interface{}
+
+	SnapshotValid bool
+	Snapshot      []byte
+	SnapshotIndex int
+	SnapshotTerm  int
 }
 
 // RunApplyLoop periodically checks whether commitIndex has advanced past
@@ -38,8 +55,35 @@ func (r *Raft) RunApplyLoop() {
 		case <-r.stopCh:
 			return
 		case <-ticker.C:
+			// Order matters: a snapshot installed since the last tick
+			// (Day 7) must reach the state machine before any regular
+			// entry that came after it, so it's delivered first, from
+			// this same goroutine — see pendingSnapshot's doc comment
+			// on the Raft struct for why nothing else may ever send on
+			// ApplyCh.
+			r.deliverPendingSnapshot()
 			r.applyPending()
 		}
+	}
+}
+
+// deliverPendingSnapshot sends whatever snapshot InstallSnapshot (Day
+// 7) queued up since the last tick, if any, to the state machine via
+// ApplyCh — see pendingSnapshot's doc comment on the Raft struct for
+// why this, not InstallSnapshot's own RPC-handler goroutine, is the
+// only thing that may ever send on that channel.
+func (r *Raft) deliverPendingSnapshot() {
+	r.mu.Lock()
+	msg := r.pendingSnapshot
+	r.pendingSnapshot = nil
+	r.mu.Unlock()
+	if msg == nil {
+		return
+	}
+
+	select {
+	case r.ApplyCh <- *msg:
+	case <-r.stopCh:
 	}
 }
 
@@ -79,7 +123,7 @@ func (r *Raft) applyPending() {
 		r.mu.Unlock()
 
 		select {
-		case r.ApplyCh <- ApplyMsg{Index: index, Term: entry.Term, Command: entry.Command}:
+		case r.ApplyCh <- ApplyMsg{CommandValid: true, Index: index, Term: entry.Term, Command: entry.Command}:
 		case <-r.stopCh:
 			return
 		}

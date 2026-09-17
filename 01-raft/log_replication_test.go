@@ -58,6 +58,11 @@ func (h *alwaysRejectHandler) AppendEntries(args *AppendEntriesArgs, reply *Appe
 	return nil
 }
 
+func (h *alwaysRejectHandler) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) error {
+	reply.Term = h.term
+	return nil
+}
+
 // TestBecomeLeaderInitializesReplicationState proves the Raft paper's
 // Figure 2 "reinitialized after election" rule: nextIndex starts
 // optimistically at (leader's last log index + 1), matchIndex starts at

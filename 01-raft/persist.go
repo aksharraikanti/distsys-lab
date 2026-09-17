@@ -105,6 +105,23 @@ func (r *Raft) restoreLocked() {
 	r.log = state.Log
 	r.lastIncludedIndex = state.LastIncludedIndex
 	r.lastIncludedTerm = state.LastIncludedTerm
+	if r.lastIncludedIndex > 0 {
+		// snapshotData isn't part of persistedState itself (it's a
+		// separate, independently-stored blob — see Persister's doc
+		// comment), so it has to be re-read from the persister
+		// explicitly here. Without this, a restarted node would
+		// correctly remember THAT it has a snapshot (lastIncludedIndex
+		// > 0) while having lost the snapshot's actual bytes — fine for
+		// nothing but a state machine restoring on this exact node's
+		// own restart (Day 6), and silently wrong the moment this node
+		// becomes leader and needs to InstallSnapshot a lagging
+		// follower (Day 7).
+		data, err := r.persister.ReadSnapshot()
+		if err != nil {
+			panic(fmt.Sprintf("raft: failed to read persisted snapshot: %v", err))
+		}
+		r.snapshotData = data
+	}
 	// commitIndex/lastApplied are volatile and normally start at their
 	// zero value on every restart — re-derived by replaying the log from
 	// the beginning. That stops being true once a snapshot has ever

@@ -5,6 +5,7 @@
 package raft
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -73,8 +74,33 @@ type Raft struct {
 	lastIncludedIndex int
 	lastIncludedTerm  int
 
+	// snapshotData is this node's current snapshot bytes, kept in
+	// memory regardless of whether a persister is attached. A persister
+	// (or its absence) only governs whether this survives a RESTART —
+	// but Day 7's InstallSnapshot needs a live, in-memory node (leader
+	// or, later, a re-sharing follower) to be able to hand its current
+	// snapshot to a peer over RPC at any moment, which has nothing to
+	// do with restart/persistence at all. Tying "can I read my own
+	// snapshot back" to "do I have a persister" — true for Day 6's own
+	// restore-on-restart use, since a persister-less node genuinely has
+	// nothing to recover — would silently break replication for the
+	// (very common in this project's own tests) persister-less case.
+	snapshotData []byte
+
 	commitIndex int
 	lastApplied int
+
+	// pendingSnapshot holds a just-installed snapshot (Day 7) waiting to
+	// be handed to the state machine via ApplyCh. It's delivered by
+	// applyPending's own goroutine (RunApplyLoop), NOT sent directly by
+	// InstallSnapshot's RPC-handler goroutine — ApplyCh must only ever
+	// have ONE sender, or a regular committed entry and an installed
+	// snapshot could race each other onto the channel in the wrong
+	// order (e.g. the state machine seeing a stale entry applied AFTER
+	// a newer snapshot already superseded it). Routing snapshot
+	// delivery through the same single apply loop that already
+	// delivers every regular entry preserves that invariant.
+	pendingSnapshot *ApplyMsg
 
 	// Leader-only replication state (Raft paper Figure 2, "reinitialized
 	// after election" — see becomeLeaderLocked). Both are keyed by peer
@@ -286,5 +312,89 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 
 	reply.Success = true
 	r.ResetElectionTimer()
+	return nil
+}
+
+// InstallSnapshot handles an incoming snapshot from the leader (Raft
+// paper §7) — Day 7's answer to the gap Day 6's replicateToPeer left
+// open: a follower whose nextIndex has fallen at or below the leader's
+// lastIncludedIndex needs entries the leader has already compacted
+// away and can never get via AppendEntries. Rather than rejecting that
+// follower forever, the leader sends its entire compacted state in one
+// RPC; this node discards its own log through LastIncludedIndex and
+// adopts the leader's snapshot as its own.
+//
+// Two cases for what happens to THIS node's log, matching the paper's
+// receiver implementation (Figure 13, steps 6-8):
+//   - If this node's own log already has an entry at LastIncludedIndex
+//     agreeing on term, everything after it is still valid — keep that
+//     suffix rather than discarding real (and possibly not-yet-visible-
+//     to-the-leader) entries the snapshot doesn't know about.
+//   - Otherwise (this node's log is shorter, or diverges at that point)
+//     there's nothing salvageable: discard the log entirely and rebuild
+//     state purely from the snapshot.
+//
+// The state machine is notified via the same ApplyCh a normal committed
+// entry would use, distinguished by SnapshotValid — from the state
+// machine's point of view, "here's a snapshot to adopt wholesale"
+// and "here's the next entry to apply" are just two different messages
+// on the same door (see apply.go's ApplyMsg).
+func (r *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) error {
+	r.mu.Lock()
+
+	if args.Term < r.currentTerm {
+		reply.Term = r.currentTerm
+		r.mu.Unlock()
+		return nil
+	}
+
+	r.becomeFollowerLocked(args.Term)
+	reply.Term = r.currentTerm
+	r.ResetElectionTimer()
+
+	if args.LastIncludedIndex <= r.lastIncludedIndex {
+		// Stale or duplicate: this node already has at least this much
+		// compacted (e.g. a retried RPC, or a race with a newer
+		// snapshot this node installed some other way). Nothing to
+		// install, and nothing new to hand the state machine either.
+		r.mu.Unlock()
+		return nil
+	}
+
+	if entryTerm, ok := r.termAtLocked(args.LastIncludedIndex); ok && entryTerm == args.LastIncludedTerm {
+		r.log = append([]LogEntry(nil), r.log[r.physicalIndexLocked(args.LastIncludedIndex)+1:]...)
+	} else {
+		r.log = nil
+	}
+	r.lastIncludedIndex = args.LastIncludedIndex
+	r.lastIncludedTerm = args.LastIncludedTerm
+	r.snapshotData = append([]byte(nil), args.Data...)
+	if r.commitIndex < args.LastIncludedIndex {
+		r.commitIndex = args.LastIncludedIndex
+	}
+	if r.lastApplied < args.LastIncludedIndex {
+		r.lastApplied = args.LastIncludedIndex
+	}
+
+	if r.persister != nil {
+		if err := r.persister.SaveStateAndSnapshot(r.encodeStateLocked(), args.Data); err != nil {
+			panic(fmt.Sprintf("raft: failed to persist installed snapshot: %v", err))
+		}
+	}
+
+	// Queued, not sent directly — see pendingSnapshot's doc comment for
+	// why this can't just send on r.ApplyCh from here. A newer
+	// InstallSnapshot overwriting an older not-yet-delivered one here is
+	// fine (and correct, not just harmless): the state machine only
+	// ever needs the LATEST snapshot, since adopting one means
+	// "discard whatever you have and replace it wholesale" — there's no
+	// value in delivering an intermediate one first.
+	r.pendingSnapshot = &ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotIndex: args.LastIncludedIndex,
+		SnapshotTerm:  args.LastIncludedTerm,
+	}
+	r.mu.Unlock()
 	return nil
 }

@@ -24,6 +24,10 @@ func (s *raftRPCService) AppendEntries(args *AppendEntriesArgs, reply *AppendEnt
 	return s.handler.AppendEntries(args, reply)
 }
 
+func (s *raftRPCService) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) error {
+	return s.handler.InstallSnapshot(args, reply)
+}
+
 // ServeNetTransport starts a net/rpc server on addr that dispatches
 // incoming RequestVote/AppendEntries calls to handler. It returns the
 // listener so the caller can close it during shutdown or between tests.
@@ -90,4 +94,12 @@ func (t *NetTransport) CallAppendEntries(peer int, args *AppendEntriesArgs, repl
 		return err
 	}
 	return c.Call("Raft.AppendEntries", args, reply)
+}
+
+func (t *NetTransport) CallInstallSnapshot(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) error {
+	c, err := t.clientFor(peer)
+	if err != nil {
+		return err
+	}
+	return c.Call("Raft.InstallSnapshot", args, reply)
 }

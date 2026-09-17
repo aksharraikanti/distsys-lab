@@ -247,6 +247,61 @@ _(fill this in as you learn — one section per day, in your own words.)_
   positive test alone can't distinguish "snapshotting is disabled" from
   "snapshotting is so aggressive it also happens to pass."
 
+### Day 7 — InstallSnapshot RPC
+- The single most important thing this day found wasn't a missing
+  feature, it was a race hiding in Day 6's own design: `InstallSnapshot`
+  runs on whatever goroutine the RPC arrives on (the leader's
+  `replicateToPeer` goroutine, via `FakeTransport`'s synchronous
+  dispatch), which is a DIFFERENT goroutine from the one
+  `RunApplyLoop`/`applyPending` already uses to send on `ApplyCh`. Two
+  independent senders on one channel means the ORDER two messages land
+  in isn't guaranteed to match the order they were logically produced
+  in — a regular entry committed just before a newer InstallSnapshot
+  could, in principle, be delivered to the state machine AFTER that
+  snapshot already replaced it, which would silently regress state.
+  The fix: `InstallSnapshot` doesn't send on `ApplyCh` at all — it just
+  queues the message (`pendingSnapshot`), and `RunApplyLoop`'s own
+  goroutine delivers it (checking for one before every regular
+  `applyPending` call). Restoring "exactly one sender" is what makes
+  the delivery order provably correct again, not just usually correct.
+  This is a general lesson worth remembering past this project: adding
+  a second producer to an existing single-producer channel is a design
+  change, not just a convenience — the invariant that made the old code
+  correct ("only one thing ever sends here") has to be re-established
+  somehow, or checked to see if it was ever actually needed.
+- The SAME "in-memory node without a persister should still work"
+  principle that's threaded through this whole project (most tests use
+  `raft.NewRaft`, not `NewRaftWithPersister`) almost broke silently
+  here: my first pass at `sendInstallSnapshot` read snapshot bytes via
+  `persister.ReadSnapshot()`, which is `nil`/empty for the common
+  persister-less case — meaning a leader that had genuinely compacted
+  its log (Snapshot doesn't require a persister; it always trims
+  `r.log`) would send an EMPTY snapshot to a lagging follower, silently
+  losing every bit of state that prefix represented. Fixed by giving
+  Raft its own in-memory `snapshotData` field, independent of whether a
+  persister is attached — a persister governs whether a snapshot
+  survives a RESTART, not whether a live, running node can hand its
+  current snapshot to a peer over RPC, and conflating the two was the
+  actual bug.
+- Writing the real 3-node, fault-injection-driven test
+  (`TestKVServerCatchesUpLaggingFollowerViaInstallSnapshot`) — not just
+  the direct, single-RPC unit tests — is what surfaced a SECOND latent
+  bug: `Snapshot`'s doc comment always claimed "the state machine has
+  already applied through index" as its precondition, but the code
+  never actually checked it, only that `index` was within the log's
+  bounds. In every unit test I'd written by hand, that held by
+  construction; in a real cluster under real timing, `commitIndex`
+  reaching an index doesn't mean `applyPending`'s ticker has caught up
+  to it yet — a caller (even the test harness itself, standing in for a
+  buggy real caller) snapshotting a moment too early would silently
+  corrupt the log, discarding entries nothing had consumed. Added the
+  missing `index > lastApplied` check so this fails loudly instead.
+  Lesson: a doc comment describing a precondition is a promise to
+  readers, not a substitute for the code actually enforcing it — and
+  the gap between "passes every test I thought to write" and "correct"
+  is exactly what a broader, more realistic test (real cluster, real
+  timing, real faults) exists to find.
+
 _(continue per day)_
 
 ## Reference material

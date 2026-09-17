@@ -11,6 +11,13 @@ import (
 // log entries without needing a live election or a second node to vote:
 // a leader's own log trivially satisfies a majority of one, so Propose
 // commits immediately (see advanceCommitIndexLocked's doc comment).
+//
+// Also starts RunApplyLoop and registers its shutdown via
+// StopElectionTimer (shared stopCh) — Snapshot's contract is "the state
+// machine has already applied through index," and Raft now actually
+// enforces that (see Snapshot's own bounds check), so any test that's
+// going to call Snapshot needs its apply loop actually running, not
+// just entries sitting committed-but-unapplied in the log.
 func singleNodeLeader(t *testing.T, persister Persister) *Raft {
 	t.Helper()
 	var r *Raft
@@ -25,7 +32,24 @@ func singleNodeLeader(t *testing.T, persister Persister) *Raft {
 	if err := r.BecomeLeader(); err != nil {
 		t.Fatalf("BecomeLeader: %v", err)
 	}
+	go r.RunApplyLoop()
+	t.Cleanup(r.StopElectionTimer)
 	return r
+}
+
+// waitForLastAppliedAtLeast polls (via direct field access — this test
+// file is white-box, same package as Raft itself) until r has actually
+// APPLIED through index, not just committed it. Snapshot's contract is
+// specifically about what's been applied; commitIndex alone isn't
+// enough, since applyPending's ticker can legitimately lag a tick or
+// two behind commitIndex advancing.
+func waitForLastAppliedAtLeast(t *testing.T, r *Raft, index int, timeout time.Duration) {
+	t.Helper()
+	waitFor(t, timeout, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.lastApplied >= index
+	})
 }
 
 // TestSnapshotDiscardsLogPrefix proves the headline behavior: after
@@ -46,6 +70,7 @@ func TestSnapshotDiscardsLogPrefix(t *testing.T) {
 	if got := r.CommitIndex(); got != lastIndex {
 		t.Fatalf("CommitIndex = %d, want %d (single-node cluster commits immediately)", got, lastIndex)
 	}
+	waitForLastAppliedAtLeast(t, r, 3, time.Second)
 
 	if err := r.Snapshot(3, []byte("snapshot-through-3")); err != nil {
 		t.Fatalf("Snapshot: %v", err)
@@ -91,6 +116,7 @@ func TestSnapshotOfAlreadyCompactedIndexIsANoOp(t *testing.T) {
 			t.Fatalf("Propose(%d): not leader", i)
 		}
 	}
+	waitForLastAppliedAtLeast(t, r, 4, time.Second)
 	if err := r.Snapshot(4, []byte("first")); err != nil {
 		t.Fatalf("Snapshot(4): %v", err)
 	}
@@ -145,6 +171,7 @@ func TestRaftStateSizeShrinksAfterSnapshot(t *testing.T) {
 	}
 	before := r.RaftStateSize()
 
+	waitForLastAppliedAtLeast(t, r, 45, time.Second)
 	if err := r.Snapshot(45, []byte("snapshot")); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -175,6 +202,7 @@ func TestSnapshotStateSurvivesRestart(t *testing.T) {
 		}
 		lastIndex = index
 	}
+	waitForLastAppliedAtLeast(t, r, 4, time.Second)
 	snapshotData := []byte("kv-store-state-as-of-index-4")
 	if err := r.Snapshot(4, snapshotData); err != nil {
 		t.Fatalf("Snapshot: %v", err)
@@ -238,8 +266,6 @@ func TestSnapshotStateSurvivesRestart(t *testing.T) {
 // wrong entry's Command.
 func TestApplyLoopSkipsCompactedEntries(t *testing.T) {
 	r := singleNodeLeader(t, nil)
-	go r.RunApplyLoop()
-	defer r.StopElectionTimer()
 
 	for i := 0; i < 3; i++ {
 		if _, _, ok := r.Propose("compacted-away"); !ok {
@@ -312,6 +338,10 @@ func TestSnapshotComposesWithRealReplication(t *testing.T) {
 		lastIndex = index
 	}
 	waitForAllCommitAtLeast(t, nodes, lastIndex, 20*ElectionTimeoutMax)
+	// Snapshot's contract is "already applied," not just "committed" —
+	// commitIndex advancing doesn't guarantee applyPending's ticker has
+	// caught up yet (see waitForLastAppliedAtLeast's doc comment).
+	waitForLastAppliedAtLeast(t, nodes[leaderID], 3, 20*ElectionTimeoutMax)
 
 	if err := nodes[leaderID].Snapshot(3, []byte("snap-through-3")); err != nil {
 		t.Fatalf("Snapshot: %v", err)
