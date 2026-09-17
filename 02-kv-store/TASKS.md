@@ -43,11 +43,16 @@ tested — "read about it" isn't done.
       goroutine leak in `KVServer`'s loops that caused cross-test flakiness
       (fixed with `Stop()`), and a `Clerk` ClientID collision from
       time-seeded `math/rand` (fixed by drawing from `crypto/rand` instead).
-- [ ] **Day 6 — Snapshotting.** Once the Raft log grows past a size
+- [x] **Day 6 — Snapshotting.** Once the Raft log grows past a size
       threshold, `KVServer` serializes its current map into a snapshot and
       tells Raft it can discard log entries up to that point — otherwise the
       log grows forever, which Stage 1 never had to solve since nothing was
-      consuming committed entries into compactable state.
+      consuming committed entries into compactable state. Required extending
+      01-raft itself (not just the KV package): every absolute log index now
+      has to translate through `lastIncludedIndex`, since `r.log` only holds
+      entries after the most recent compaction, and `Persister` gained a
+      second, independently-stored blob for the opaque snapshot bytes
+      alongside the existing term/votedFor/log.
 - [ ] **Day 7 — InstallSnapshot RPC.** A new Raft RPC (extending 01-raft) for
       the case Day 6 creates: a follower that's fallen far enough behind that
       the leader has already discarded the log entries it needs. Instead of

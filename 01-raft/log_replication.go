@@ -46,23 +46,39 @@ func (r *Raft) replicate() {
 // succeeds, so the failure branch here is unreachable through the live
 // system — same situation Day 7's append logic was in before this day
 // wired a real caller up to it.
+//
+// Day 6 adds one more thing replicateToPeer has to know about: a peer
+// whose nextIndex has fallen at or below lastIncludedIndex needs
+// entries this node no longer has — they were compacted into a
+// snapshot. Sending AppendEntries with a PrevLogIndex this node can't
+// even look up itself would be pointless (it can only ever reject).
+// Until Day 7's InstallSnapshot RPC exists to actually catch such a
+// peer up, this function just skips it for the round rather than send
+// a call that can't succeed — a documented gap, not a silent one.
 func (r *Raft) replicateToPeer(peer int) {
 	r.mu.Lock()
 	if r.state != Leader {
 		r.mu.Unlock()
 		return
 	}
+	next := r.nextIndex[peer]
+	if next <= r.lastIncludedIndex {
+		r.mu.Unlock()
+		return
+	}
 	term := r.currentTerm
 	leaderID := r.id
-	next := r.nextIndex[peer]
 	prevLogIndex := next - 1
 	prevLogTerm := 0
-	if prevLogIndex >= 1 && prevLogIndex <= len(r.log) {
-		prevLogTerm = r.log[prevLogIndex-1].Term
+	if prevLogIndex >= 1 {
+		// ok is guaranteed true: prevLogIndex == next-1 >= lastIncludedIndex
+		// follows directly from the next <= lastIncludedIndex guard above.
+		prevLogTerm, _ = r.termAtLocked(prevLogIndex)
 	}
+	lastLogIndex := r.lastIncludedIndex + len(r.log)
 	var entries []LogEntry
-	if next <= len(r.log) {
-		entries = append([]LogEntry(nil), r.log[next-1:]...)
+	if next <= lastLogIndex {
+		entries = append([]LogEntry(nil), r.log[r.physicalIndexLocked(next):]...)
 	}
 	leaderCommit := r.commitIndex
 	r.mu.Unlock()

@@ -22,7 +22,7 @@ func TestPutAppendAndGetRoundTrip(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
 	var putReply PutAppendReply
@@ -64,7 +64,7 @@ func TestGetReturnsErrNoKeyForMissingKey(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
 	var reply GetReply
@@ -84,7 +84,7 @@ func TestGetRejectsWhenNotLeader(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 	var reply GetReply
 	if err := kv.Get(&GetArgs{Key: "x"}, &reply); err != nil {
@@ -100,7 +100,7 @@ func TestPutAppendRejectsWhenNotLeader(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 	var reply PutAppendReply
 	if err := kv.PutAppend(&PutAppendArgs{Key: "x", Value: "1", Op: "Put", ClientID: 1, SeqNum: 1}, &reply); err != nil {
@@ -125,7 +125,7 @@ func TestPutAppendTimesOutWhenEntryNeverCommits(t *testing.T) {
 		rf := raft.NewRaft(id, otherPeers(ids, id), transport)
 		nodes[id] = rf
 		transport.Register(id, rf)
-		kvs[id] = NewKVServer(rf)
+		kvs[id] = NewKVServer(rf, -1)
 	}
 	for _, rf := range nodes {
 		go rf.RunElectionTimer()
@@ -187,7 +187,7 @@ func TestPutAppendDetectsSupersededProposal(t *testing.T) {
 		rf := raft.NewRaft(id, otherPeers(ids, id), transport)
 		nodes[id] = rf
 		transport.Register(id, rf)
-		kvs[id] = NewKVServer(rf)
+		kvs[id] = NewKVServer(rf, -1)
 	}
 	for _, rf := range nodes {
 		go rf.RunHeartbeats()

@@ -25,7 +25,7 @@ func TestPutAppendBailsOutQuicklyWhenLeadershipLost(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
 	replyCh := make(chan PutAppendReply, 1)
@@ -75,7 +75,7 @@ func TestPutAppendSucceedsWhenLeadershipNeverLost(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
 	// A single-node cluster commits immediately, but the poll loop still

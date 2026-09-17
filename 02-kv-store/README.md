@@ -189,6 +189,64 @@ _(fill this in as you learn — one section per day, in your own words.)_
      and removes the whole class of seed-collision risk rather than just
      widening the window.
 
+### Day 6 — Snapshotting
+- This day turned out to live mostly in `01-raft`, not `02-kv-store` —
+  the KV-store side (`snapshotLocked`, the size check in `applyLoop`,
+  restoring from `rf.ReadSnapshot()` in `NewKVServer`) is almost
+  incidental compared to what compaction demands of Raft itself. Every
+  place that indexed `r.log` directly (`AppendEntries`,
+  `advanceCommitIndexLocked`, `applyPending`, `replicateToPeer`,
+  `lastLogInfoLocked`, `Propose`) was written, across Stage 1, on the
+  unstated assumption that `r.log`'s physical position and a paper-style
+  absolute index are the same number. Compaction breaks that assumption
+  outright — `r.log` only holds entries AFTER `lastIncludedIndex` once
+  `Snapshot` has trimmed a prefix off it — so every one of those sites
+  needed a real translation (`physicalIndexLocked`/`termAtLocked`), not
+  a patch. Worth remembering for future "just bolt this feature on"
+  estimates: a change that sounds additive can still touch nearly every
+  file in a package if enough existing code was written against an
+  assumption the new feature invalidates.
+- `Persister` grew a second, INDEPENDENT pair of methods
+  (`SaveStateAndSnapshot`/`ReadSnapshot`) rather than folding snapshot
+  bytes into the existing `SaveState` blob. Two reasons: snapshots can
+  be large and change on a different rhythm than term/votedFor/log
+  (every mutation), and — more load-bearing — `SaveStateAndSnapshot`
+  writes snapshot BEFORE state, deliberately, because state is what
+  "commits" the compaction (it carries `LastIncludedIndex/Term`, the
+  claim that a prefix is reconstructible from the snapshot instead of
+  the log). A crash between the two writes is only safe in that order:
+  writing state first and crashing before snapshot lands would leave a
+  claim on disk with nothing backing it up — real, unrecoverable data
+  loss on the next restore. Writing snapshot first just leaves a stray,
+  harmless file if a crash lands in between.
+- The size-check placement in `applyLoop` — inside the same
+  already-held `kv.mu` critical section that just applied an entry,
+  checked after EVERY entry rather than on a separate timer — wasn't
+  the obvious choice going in, but it turned out to be the simplest
+  correct one: `RaftStateSize` only grows one entry at a time, so
+  there's no way to overshoot a threshold between checks, and the lock
+  is already held with exactly the consistent `store`/`duplicateTable`
+  view `snapshotLocked` needs to serialize. A separate ticker would
+  have needed its own re-locking and its own reasoning about "what if a
+  entry is applied between now and my next tick" for no actual benefit.
+- `kvSnapshot` bundles `store` AND `duplicateTable` into one encoded
+  blob, not two separate `Snapshot` calls or two fields serialized
+  independently. They have to be restored as of the exact same log
+  index — restoring one without the other reopens exactly the class of
+  bug Day 3 closed: a request whose effect landed right at the
+  snapshot's boundary could either double-apply (dedup entry missing)
+  or get wrongly treated as already-seen (store entry missing) after a
+  restart, depending on which half survived and which didn't.
+- Writing `TestKVServerNeverSnapshotsWhenDisabled` as the explicit
+  control for `TestKVServerSnapshotsWhenRaftStateExceedsThreshold` felt
+  like overkill at first — of course `maxRaftState: -1` disables
+  snapshotting, it's a straightforward early-return. But without a test
+  actually asserting "and this state stays large, unbounded," nothing
+  in this package would catch a future change that accidentally made
+  `-1` behave like "snapshot immediately" instead of "never" — the
+  positive test alone can't distinguish "snapshotting is disabled" from
+  "snapshotting is so aggressive it also happens to pass."
+
 _(continue per day)_
 
 ## Reference material

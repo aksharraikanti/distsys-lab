@@ -1,9 +1,9 @@
 # Progress
 
 Current stage: **02-kv-store**
-Current day: **Day 6 — Snapshotting** (next up)
+Current day: **Day 7 — InstallSnapshot RPC** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
-Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-5 complete.
+Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-6 complete.
 
 ## Log
 
@@ -170,3 +170,22 @@ Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-5 complete.
   shared across two different clients' Propose calls; fixed by drawing
   ClientID from `crypto/rand` instead. 25/25 clean stress runs and 10/10 clean
   full-suite runs under `-race` after the fix.
+- 2026-09-17 — Day 6 (Snapshotting) complete: `KVServer` now serializes
+  `store`+`duplicateTable` together (`kvSnapshot`) once `rf.RaftStateSize()`
+  crosses `maxRaftState`, handing the bytes to a new `raft.Raft.Snapshot`.
+  Most of the actual work landed in `01-raft`, not `02-kv-store`: every
+  place that indexed the log directly (`AppendEntries`,
+  `advanceCommitIndexLocked`, `applyPending`, `replicateToPeer`,
+  `lastLogInfoLocked`, `Propose`) assumed a log's physical position and its
+  paper-style absolute index were the same number — an assumption
+  compaction breaks outright once `r.log` only holds entries after
+  `lastIncludedIndex`. Added `physicalIndexLocked`/`termAtLocked` and
+  threaded them through every one of those sites. `Persister` gained
+  `SaveStateAndSnapshot`/`ReadSnapshot` — snapshot written BEFORE state,
+  deliberately, since state is what "commits" the compaction
+  (`LastIncludedIndex/Term`), and the reverse order risks a claim on disk
+  with nothing backing it up if a crash lands in between. A follower whose
+  `nextIndex` falls at or below `lastIncludedIndex` is a known, documented
+  gap left for Day 7's `InstallSnapshot` RPC — `replicateToPeer` just skips
+  that peer for the round rather than send a doomed `AppendEntries`. 15/15
+  clean full-suite runs under `-race` after landing.

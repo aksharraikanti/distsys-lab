@@ -23,7 +23,7 @@ func TestDuplicateRequestNotDoubleApplied(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
 	op := Op{Type: "Append", Key: "x", Value: "a", ClientID: 1, SeqNum: 1}
@@ -61,7 +61,7 @@ func TestDifferentSeqNumsBothApply(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
 	if _, _, ok := rf.Propose(Op{Type: "Append", Key: "x", Value: "a", ClientID: 1, SeqNum: 1}); !ok {
@@ -91,7 +91,7 @@ func TestDifferentClientsSameSeqNumBothApply(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
 	if _, _, ok := rf.Propose(Op{Type: "Append", Key: "x", Value: "a", ClientID: 1, SeqNum: 1}); !ok {
@@ -124,7 +124,7 @@ func TestStaleRetryAfterNewerRequestSuppressed(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
 	if _, _, ok := rf.Propose(Op{Type: "Append", Key: "x", Value: "a", ClientID: 1, SeqNum: 1}); !ok {
@@ -165,7 +165,7 @@ func TestDuplicatePutAppendStillGetsOKReply(t *testing.T) {
 	go rf.RunApplyLoop()
 	defer rf.StopElectionTimer()
 
-	kv := NewKVServer(rf)
+	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
 	args := &PutAppendArgs{Key: "x", Value: "a", Op: "Append", ClientID: 1, SeqNum: 1}

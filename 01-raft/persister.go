@@ -13,9 +13,24 @@ import (
 // to those three fields, before that mutation becomes visible outside
 // this node (an RPC reply, a Propose return). ReadState is called once,
 // at construction, to recover after a restart.
+//
+// SaveStateAndSnapshot/ReadSnapshot (Day 6) do the same job for a
+// second, independent blob: the state machine's own serialized
+// snapshot, opaque to Raft itself. They're separate from
+// SaveState/ReadState — rather than, say, folding the snapshot bytes
+// into persistedState — because snapshots can be large and change on a
+// different rhythm (whenever the size-based policy fires) than
+// term/votedFor/log (every single mutation). SaveStateAndSnapshot takes
+// BOTH blobs in one call, not two separate calls, because they must
+// become durable together: state's LastIncludedIndex/Term is what
+// claims a given prefix of the log is safely reconstructible from
+// snapshot, so persisting one without the other risks a claim that
+// doesn't match what's actually on disk.
 type Persister interface {
 	SaveState(state []byte) error
 	ReadState() ([]byte, error)
+	SaveStateAndSnapshot(state []byte, snapshot []byte) error
+	ReadSnapshot() ([]byte, error)
 }
 
 // MemoryPersister is an in-memory Persister. It "survives a restart"
@@ -25,8 +40,9 @@ type Persister interface {
 // (see persist_test.go). It does NOT survive an actual process exit;
 // FilePersister is what does that.
 type MemoryPersister struct {
-	mu    sync.Mutex
-	state []byte
+	mu       sync.Mutex
+	state    []byte
+	snapshot []byte
 }
 
 // NewMemoryPersister returns an empty MemoryPersister — equivalent to a
@@ -48,11 +64,28 @@ func (p *MemoryPersister) ReadState() ([]byte, error) {
 	return append([]byte(nil), p.state...), nil
 }
 
-// FilePersister durably stores state on disk at a fixed path.
+func (p *MemoryPersister) SaveStateAndSnapshot(state, snapshot []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.state = append([]byte(nil), state...)
+	p.snapshot = append([]byte(nil), snapshot...)
+	return nil
+}
+
+func (p *MemoryPersister) ReadSnapshot() ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]byte(nil), p.snapshot...), nil
+}
+
+// FilePersister durably stores state on disk at a fixed path, and (Day
+// 6) a snapshot alongside it at that same path plus a ".snapshot"
+// suffix.
 //
-// Every SaveState writes to a temp file in the same directory, fsyncs
-// it, atomically renames it over the real path, then fsyncs the
-// directory too. Each step closes a distinct crash-consistency gap:
+// Every write goes through writeFileAtomicLocked: write to a temp file
+// in the same directory, fsync it, atomically rename it over the real
+// path, then fsync the directory too. Each step closes a distinct
+// crash-consistency gap:
 //
 //   - Writing directly to the real path (no temp file) risks a crash
 //     mid-write leaving a half-written, corrupted file with no way to
@@ -72,22 +105,63 @@ func (p *MemoryPersister) ReadState() ([]byte, error) {
 // during this sequence a reader sees either the complete OLD file or the
 // complete NEW file — never a partial one.
 type FilePersister struct {
-	path string
-	mu   sync.Mutex
+	path         string
+	snapshotPath string
+	mu           sync.Mutex
 }
 
-// NewFilePersister returns a FilePersister backed by the file at path.
-// The containing directory must already exist.
+// NewFilePersister returns a FilePersister backed by the file at path
+// (and, for snapshots, path+".snapshot"). The containing directory must
+// already exist.
 func NewFilePersister(path string) *FilePersister {
-	return &FilePersister{path: path}
+	return &FilePersister{path: path, snapshotPath: path + ".snapshot"}
 }
 
 func (p *FilePersister) SaveState(state []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.writeFileAtomicLocked(p.path, state)
+}
 
-	dir := filepath.Dir(p.path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(p.path)+".tmp-*")
+func (p *FilePersister) ReadState() ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return readFileOrEmpty(p.path)
+}
+
+// SaveStateAndSnapshot persists both blobs, snapshot FIRST and state
+// SECOND — the only ordering a crash between the two can't corrupt.
+// state is what "commits" the compaction: it's the one carrying
+// LastIncludedIndex/Term, the claim that everything through that index
+// is now reconstructible from the snapshot instead of the (now
+// shorter) log. Writing state first and crashing before snapshot lands
+// would leave that claim on disk with nothing to back it up —
+// unrecoverable data loss on the next restore. Writing snapshot first
+// means a crash in between just leaves a stray, still-unreferenced
+// snapshot file behind: restoreLocked will read the OLD state (still
+// describing the larger, not-yet-trimmed log), so nothing is lost
+// either way.
+func (p *FilePersister) SaveStateAndSnapshot(state, snapshot []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.writeFileAtomicLocked(p.snapshotPath, snapshot); err != nil {
+		return err
+	}
+	return p.writeFileAtomicLocked(p.path, state)
+}
+
+func (p *FilePersister) ReadSnapshot() ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return readFileOrEmpty(p.snapshotPath)
+}
+
+// writeFileAtomicLocked is the shared temp-file/fsync/rename/fsync-dir
+// sequence SaveState and SaveStateAndSnapshot both build on. Caller
+// must already hold p.mu.
+func (p *FilePersister) writeFileAtomicLocked(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
@@ -97,7 +171,7 @@ func (p *FilePersister) SaveState(state []byte) error {
 	// this second removal attempt is a harmless no-op error we ignore.
 	defer os.Remove(tmpName)
 
-	if _, err := tmp.Write(state); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -108,7 +182,7 @@ func (p *FilePersister) SaveState(state []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, p.path); err != nil {
+	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
 
@@ -120,13 +194,13 @@ func (p *FilePersister) SaveState(state []byte) error {
 	return dirFile.Sync()
 }
 
-func (p *FilePersister) ReadState() ([]byte, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	data, err := os.ReadFile(p.path)
+// readFileOrEmpty reads path, treating "doesn't exist yet" as a valid
+// empty result (a first-ever boot, or a node that's never snapshotted)
+// rather than an error.
+func readFileOrEmpty(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil // first-ever boot — nothing persisted yet
+		return nil, nil
 	}
 	return data, err
 }

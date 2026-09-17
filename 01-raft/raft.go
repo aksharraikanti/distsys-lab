@@ -62,6 +62,17 @@ type Raft struct {
 	votedFor    int
 	log         []LogEntry
 
+	// lastIncludedIndex/lastIncludedTerm describe the entry a snapshot
+	// (Day 6, snapshot.go) most recently replaced: r.log now holds only
+	// entries AFTER lastIncludedIndex, so every absolute (paper-style,
+	// 1-indexed) log index has to be translated to a position in r.log
+	// via physicalIndexLocked before it can be used to index the slice
+	// directly. lastIncludedIndex 0 (the default) means "no snapshot has
+	// ever been taken" — every absolute index still equals its physical
+	// one, exactly as it did before Day 6.
+	lastIncludedIndex int
+	lastIncludedTerm  int
+
 	commitIndex int
 	lastApplied int
 
@@ -218,6 +229,16 @@ func (r *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error
 // off by one whenever this check rejects — that backoff-and-retry path
 // only became reachable for real once this check existed to produce a
 // genuine rejection.
+//
+// Day 6 adds one more rejection case: PrevLogIndex can fall BEFORE
+// lastIncludedIndex, meaning this node has already compacted away the
+// entry the leader wants to check against. Rejecting is conservative —
+// it never risks accepting something unverified — but it's also a dead
+// end on its own: the leader will keep backing nextIndex off and keep
+// landing here again, since the entry it's checking against is gone for
+// good, not just temporarily missing. Day 7's InstallSnapshot RPC is
+// the leader-side fix — recognizing this exact situation and sending
+// the whole snapshot instead of retrying AppendEntries forever.
 func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -231,8 +252,10 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 	r.becomeFollowerLocked(args.Term)
 	reply.Term = r.currentTerm
 
+	lastLogIndex, _ := r.lastLogInfoLocked()
 	if args.PrevLogIndex > 0 {
-		if args.PrevLogIndex > len(r.log) || r.log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
+		prevTerm, ok := r.termAtLocked(args.PrevLogIndex)
+		if args.PrevLogIndex > lastLogIndex || !ok || prevTerm != args.PrevLogTerm {
 			reply.Success = false
 			// Still a legitimate leader for this term — just missing an
 			// entry this node needs first. Reset the timer so this
@@ -244,7 +267,7 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 	}
 
 	if len(args.Entries) > 0 {
-		r.log = append(r.log[:args.PrevLogIndex], args.Entries...)
+		r.log = append(r.log[:r.physicalIndexLocked(args.PrevLogIndex)+1], args.Entries...)
 		r.persistLocked()
 	}
 
