@@ -6,15 +6,16 @@ once it's implemented AND tested — "read about it" isn't done.
 
 Package: `pool` (import path `github.com/aksharraikanti/distsys-lab/03-connection-pooling`).
 
-- [ ] **Day 1 — Real network boundary.** Every earlier stage's `Clerk` has
+- [x] **Day 1 — Real network boundary.** Every earlier stage's `Clerk` has
       called `KVServer` methods directly, in-process — no actual socket
       between client and server. Pooling a connection means nothing without a
       real connection to pool, so this day comes first: expose `KVServer`
       over real TCP via `net/rpc`, mirroring 01-raft's own
       `NetTransport`/`ServeNetTransport` pattern (`ServeKVServer(addr, kv)`
-      on the server side). A bare client dials fresh per request — no pooling
-      yet — establishing the cold-start baseline every later day measures
-      against.
+      on the server side). A bare `NaiveClient` dials fresh per request — no
+      pooling yet — establishing the cold-start baseline every later day
+      measures against: ~3.1ms/op (fresh dial + RPC, 3-node loopback cluster,
+      Apple M2 Pro) via `BenchmarkNaiveClientPutAppend`.
 - [ ] **Day 2 — Naive fixed-size pool.** A pool of N already-dialed
       connections, checked out before a request and checked back in after,
       reused across requests instead of dialing per call. Benchmark

@@ -1,10 +1,10 @@
 # Progress
 
 Current stage: **03-connection-pooling**
-Current day: **Day 1 — Real network boundary** (next up)
+Current day: **Day 2 — Naive fixed-size pool** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
-Stage 3 (Connection pooling layer) scoped into 6 days, not yet started.
+Stage 3 (Connection pooling layer) scoped into 6 days, Day 1 complete.
 
 ## Log
 
@@ -236,3 +236,14 @@ Stage 3 (Connection pooling layer) scoped into 6 days, not yet started.
   crashed node, idle eviction and pool sizing, and a final load test
   combining Stage 2's own concurrent-client and fault-injection patterns
   with the pool sitting in between.
+- 2026-09-19 — Day 1 (Real network boundary) complete: `ServeKVServer`
+  exposes a `KVServer` over real TCP via `net/rpc` (no wrapper type needed —
+  `Get`/`PutAppend` already had the exact shape `net/rpc` requires, unlike
+  01-raft's `raftRPCService`, since `KVServer` never sat behind an
+  interface). `NaiveClient` dials a fresh connection per call — no pooling —
+  and turned out nearly line-for-line identical to `Clerk`'s own retry
+  logic; the only real difference is that a dial/call can now fail outright
+  (a real socket, not an in-process call), treated the same way `Clerk`
+  already treats an unreachable peer. `BenchmarkNaiveClientPutAppend`
+  measures the cold-start baseline every later day's pooling has to beat:
+  ~3.1ms/op on a 3-node loopback cluster.
