@@ -1,9 +1,10 @@
 # Progress
 
-Current stage: **02-kv-store**
-Current day: **Day 8 — Full integration** (next up)
+Current stage: **03-connection-pooling**
+Current day: **Day 1 — Real network boundary** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
-Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-7 complete.
+Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
+Stage 3 (Connection pooling layer) scoped into 6 days, not yet started.
 
 ## Log
 
@@ -210,3 +211,28 @@ Stage 2 (Fault-tolerant KV store on Raft) scoped into 8 days, Days 1-7 complete.
   having genuinely compacted its log. `KVServer.applyLoop` now handles
   `msg.SnapshotValid` by restoring `store`/`duplicateTable` wholesale.
   20/20 clean full-suite runs under `-race` after landing.
+- 2026-09-19 — Day 8 (Full integration) complete, and with it, **Stage 2 is
+  done**. Two tests: a 5-node cluster running concurrent clients through
+  crashes AND partitions with a low `maxRaftState` forcing real snapshotting
+  (the combination that finally exercises `InstallSnapshot` under real
+  concurrent load), and a separate whole-cluster restart test (every node's
+  Raft+KVServer discarded and rebuilt from persisted state, snapshot
+  included — split into its own test since `Clerk` calls `KVServer` directly
+  with no RPC boundary to survive a mid-test object swap through). The
+  restart test's first run failed on the very last fragment of the very
+  last key — not data loss, but a freshly re-elected leader's volatile
+  `commitIndex` not yet having caught back up via `noopLoop`'s
+  re-confirmation (Day 5's own known characteristic, seen for the first
+  time in a whole-cluster-restart context); fixed by waiting for
+  `CommitIndex` to catch up before trusting a `Get`, not by changing
+  production code. 30/30 clean isolated runs and 20/20 clean full-suite runs
+  under `-race`.
+- 2026-09-19 — Stage 3 (Connection pooling layer) scoped into 6 days
+  (`03-connection-pooling/TASKS.md`): every earlier stage's `Clerk` has
+  called `KVServer` directly, in-process, so this stage starts by putting a
+  real `net/rpc`-over-TCP boundary back in (mirroring 01-raft's own
+  `NetTransport`), then builds a bounded connection pool on top of it —
+  backpressure under exhaustion, health-checked eviction of connections to a
+  crashed node, idle eviction and pool sizing, and a final load test
+  combining Stage 2's own concurrent-client and fault-injection patterns
+  with the pool sitting in between.
