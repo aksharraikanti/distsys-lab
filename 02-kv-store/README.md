@@ -302,6 +302,52 @@ _(fill this in as you learn — one section per day, in your own words.)_
   is exactly what a broader, more realistic test (real cluster, real
   timing, real faults) exists to find.
 
+### Day 8 — Full integration
+- Splitting this into TWO tests, rather than one that tried to cover
+  everything at once, turned out to be the right call rather than a
+  compromise. `KVServer`'s client-facing methods are called directly by
+  `Clerk` — there's no RPC boundary in this stage, by design (Stage 3 is
+  what adds a real network boundary) — which means a `Clerk` holding a
+  frozen `[]*KVServer` has no way to observe a mid-test object swap.
+  "Crash via unreachability" (Day 5/Day 12's `Unregister`/`Register` and
+  `Partition`/`Heal`) keeps every object's identity alive the whole
+  time, so it composes fine with a single long-running cluster and
+  concurrent `Clerk`s. A REAL restart — discarding and reconstructing
+  Raft+KVServer from persisted state — fundamentally can't, without
+  either inventing a live-object-swap mechanism inside `KVServer` purely
+  to satisfy one test, or accepting that a fresh `Clerk` after a full
+  restart is what a real client would do anyway (reconnect after an
+  outage, not keep silently retrying against a socket that no longer
+  points at anything). Chose the second: two tests, not one clever one.
+- The whole-cluster restart test's first run failed — the very last
+  fragment of the very last key was missing right after restart, with
+  everything else correct. Not data loss: every node's OWN `CommitIndex`
+  is volatile, reset on restart (correctly — the Raft paper never
+  persists it), and a freshly re-elected leader has to re-confirm its
+  commitIndex via real `AppendEntries` replies reaching a majority again
+  in its own new term before it catches back up to what was ALREADY
+  committed pre-crash — `noopLoop` (Day 5) is what drives that
+  re-confirmation, and it just hadn't finished yet the instant the test
+  queried `Get`. Same mechanism Day 5's own doc comments already named
+  ("a freshly-elected leader hasn't confirmed its own older entries
+  yet"), observed for the first time in a whole-cluster-restart
+  context rather than a single-leader-failover one. Fixed the test by
+  waiting for every restarted node's `CommitIndex` to reach the known
+  pre-crash value before trusting any `Get` — not by changing production
+  code, since production code was already correct; the test was just
+  querying before the system's own documented catch-up window closed.
+- Forcing `maxRaftState` low enough that the concurrent-clients-plus-
+  faults test ACTUALLY snapshots (checked explicitly at the end, not
+  just hoped for) is what finally exercises `InstallSnapshot` under
+  real concurrent load and real partition timing, rather than only the
+  hand-built single-fault scenario Day 7's own test constructed. This
+  is the version of the invariant that matters most: not "does
+  InstallSnapshot work in isolation," but "does the whole system — log
+  replication, commit rule, snapshotting, InstallSnapshot, duplicate
+  detection, and client retries — still hold together when every piece
+  is firing at once, which is the only way any of it will ever actually
+  run in practice."
+
 _(continue per day)_
 
 ## Reference material

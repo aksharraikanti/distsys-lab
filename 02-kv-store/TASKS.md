@@ -69,10 +69,21 @@ tested — "read about it" isn't done.
       machine has already applied through index" — was never actually
       enforced, which could silently corrupt the log under the right timing;
       added the missing check.
-- [ ] **Day 8 — Full integration.** Fault injection (crashes, partitions,
+- [x] **Day 8 — Full integration.** Fault injection (crashes, partitions,
       restarts) combined with concurrent clients AND snapshotting all running
       at once — the fullest test this stage can produce, proving the pieces
-      built across Days 1-7 actually compose.
+      built across Days 1-7 actually compose. Two tests: a 5-node cluster
+      running concurrent clients through crashes AND partitions with
+      snapshotting forced on by a low `maxRaftState` (the combination that
+      finally exercises `InstallSnapshot` under real concurrent load, not a
+      hand-built scenario), and a separate whole-cluster restart test (every
+      node's Raft+KVServer discarded and rebuilt from persisted state,
+      snapshot included). The restart test caught a real timing gap worth
+      remembering: a freshly re-elected leader's `commitIndex` is volatile
+      and resets on restart, so a `Get` issued the instant a leader is
+      elected can legitimately answer from state that hasn't caught back up
+      yet — the same characteristic Day 5's `noopLoop` exists to bound, seen
+      for the first time in a whole-cluster-restart context.
 
 ## Done means
 
