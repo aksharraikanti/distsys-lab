@@ -20,6 +20,37 @@ without leaking connections or deadlocking under backpressure?
 
 _(fill this in as you learn — one section per day, in your own words.)_
 
+### Day 1 — Real network boundary
+- `KVServer.Get`/`PutAppend` already had exactly the shape `net/rpc`
+  requires (exported method, on an exported type, `*Args` in, `*Reply`
+  out, `error` returned) — so `ServeKVServer` needed no wrapper type at
+  all, unlike 01-raft's `raftRPCService`. That wrapper existed there
+  because `NetTransport`/`FakeTransport` both had to satisfy the SAME
+  `raft.RPCHandler` interface, and `net/rpc.RegisterName` needs a
+  concrete receiver to reflect over. `KVServer` never had an interface
+  boundary to begin with (`Clerk` always called it directly), so there
+  was nothing to bridge — registering `kv` itself was enough.
+- `NaiveClient` turned out to be almost a line-for-line copy of
+  `Clerk`, and that similarity is the actual finding, not incidental:
+  the RETRY logic (round-robin from `lastKnown`, retry on
+  `ErrWrongLeader`, ClientID+SeqNum for dedup) has nothing to do with
+  whether the transport is in-process or a real socket — it's entirely
+  about not knowing which node currently leads. The ONE thing that
+  changed is what counts as "this attempt failed, try the next server":
+  `Clerk` only had `reply.Err` to look at, but `NaiveClient` can ALSO
+  fail at the dial or the call itself (`rpc.Dial`/`client.Call`
+  returning an error) — a failure mode that plainly can't exist without
+  a real socket. Treating that the same way `Clerk` already treats an
+  unreachable-in-FakeTransport peer (skip to the next server, don't
+  error out) was the only real design decision this day needed to make.
+- Measuring the cold-start baseline (`BenchmarkNaiveClientPutAppend`,
+  ~3.1ms/op on loopback) before writing a single line of pooling code
+  was worth doing explicitly rather than skipping to "obviously pooling
+  will be faster." Even over loopback, on the same machine, dialing
+  fresh every call is measurably expensive — the TCP handshake cost is
+  real, not theoretical, which is exactly the number the rest of this
+  stage needs to actually move.
+
 _(continue per day)_
 
 ## Reference material
