@@ -1,9 +1,20 @@
 package pool
 
 import (
+	"errors"
 	"fmt"
 	"net/rpc"
+	"time"
+
+	raft "github.com/aksharraikanti/distsys-lab/01-raft"
 )
+
+// ErrPoolExhausted is returned by Call when every connection in the
+// pool was still checked out by some other concurrent caller for the
+// entire checkoutTimeout — see Pool's own doc comment for why a bounded
+// wait, not an unbounded block or an immediate rejection, is Day 3's
+// deliberate choice.
+var ErrPoolExhausted = errors.New("pool: no connection became available before the checkout timeout")
 
 // Pool is a fixed-size set of already-dialed *rpc.Client connections
 // to ONE server address, checked out before a call and checked back in
@@ -12,26 +23,35 @@ import (
 // BenchmarkNaiveClientPutAppend for the cold-start cost this exists to
 // avoid).
 //
-// "Fixed-size" is deliberately literal for Day 2: exactly size
-// connections are dialed once, at construction, and the set never
-// grows or shrinks afterward. A checkout beyond that many concurrent
-// callers blocks until another caller checks one back in — that's free
-// behavior from using a buffered channel as the free list, not yet a
-// deliberate policy. Day 3 makes "what happens under exhaustion" an
-// explicit choice (block-with-timeout, an overflow queue, or reject).
-// Day 4 adds detecting and replacing a connection that's gone bad. Day
-// 5 adds idle eviction and resizing. None of that exists yet — this is
-// the simplest version that's still correct.
+// "Fixed-size" is deliberately literal: exactly size connections are
+// dialed once, at construction, and the set never grows or shrinks
+// afterward (Day 5 adds resizing). More concurrent callers than size is
+// the NORMAL case under real load, not an edge case — checkoutTimeout
+// (Day 3) is the deliberate policy for it: Call blocks until a
+// connection frees up, but only up to checkoutTimeout, then returns
+// ErrPoolExhausted. Two other policies were on the table and rejected:
+// an unbounded overflow queue just moves the problem (unbounded memory
+// growth instead of blocked goroutines) without actually bounding wait
+// time; rejecting immediately treats "busy right now" the same as
+// "actually broken," which would make a routine, short-lived burst fail
+// requests it could easily have absorbed. A bounded wait gives a real
+// burst a real chance to drain while still failing fast enough that the
+// caller's own retry loop (client.go) can fall back to a different
+// server rather than hang behind this one indefinitely. Day 4 adds
+// detecting and replacing a connection that's gone bad, not just busy.
 type Pool struct {
-	addr string
-	free chan *rpc.Client
+	addr            string
+	free            chan *rpc.Client
+	checkoutTimeout time.Duration
 }
 
 // NewPool dials size connections to addr up front and returns a Pool
-// ready to hand them out. If any dial fails, every connection already
+// ready to hand them out, waiting up to checkoutTimeout for a
+// connection to free up on each Call before reporting
+// ErrPoolExhausted. If any dial fails, every connection already
 // established is closed before returning the error — a partially
 // initialized pool would be a silent resource leak, not a smaller pool.
-func NewPool(addr string, size int) (*Pool, error) {
+func NewPool(addr string, size int, checkoutTimeout time.Duration) (*Pool, error) {
 	conns := make([]*rpc.Client, 0, size)
 	for i := 0; i < size; i++ {
 		c, err := rpc.Dial("tcp", addr)
@@ -47,19 +67,24 @@ func NewPool(addr string, size int) (*Pool, error) {
 	for _, c := range conns {
 		free <- c
 	}
-	return &Pool{addr: addr, free: free}, nil
+	return &Pool{addr: addr, free: free, checkoutTimeout: checkoutTimeout}, nil
 }
 
-// Call checks out a connection, makes the RPC, and checks the
-// connection back in — even on error. A naive fixed-size pool doesn't
-// yet distinguish a transient RPC-level error (the KV server replying
-// ErrWrongLeader, say — a perfectly healthy connection, just to the
-// wrong node) from a genuinely broken connection; that distinction,
-// and evicting/replacing a connection that's actually dead, is Day 4's
-// job. For now every checked-out connection always comes back to the
-// free list.
+// Call checks out a connection (waiting up to checkoutTimeout — see
+// ErrPoolExhausted), makes the RPC, and checks the connection back in —
+// even on error. A naive fixed-size pool doesn't yet distinguish a
+// transient RPC-level error (the KV server replying ErrWrongLeader,
+// say — a perfectly healthy connection, just to the wrong node) from a
+// genuinely broken connection; that distinction, and evicting/
+// replacing a connection that's actually dead, is Day 4's job. For now
+// every checked-out connection always comes back to the free list.
 func (p *Pool) Call(method string, args, reply interface{}) error {
-	c := <-p.free
+	var c *rpc.Client
+	select {
+	case c = <-p.free:
+	case <-time.After(p.checkoutTimeout):
+		return ErrPoolExhausted
+	}
 	defer func() { p.free <- c }()
 	return c.Call(method, args, reply)
 }
@@ -91,10 +116,10 @@ type pooledCaller struct {
 	pools map[string]*Pool
 }
 
-func newPooledCaller(addrs []string, size int) (*pooledCaller, error) {
+func newPooledCaller(addrs []string, size int, checkoutTimeout time.Duration) (*pooledCaller, error) {
 	pools := make(map[string]*Pool, len(addrs))
 	for _, addr := range addrs {
-		p, err := NewPool(addr, size)
+		p, err := NewPool(addr, size, checkoutTimeout)
 		if err != nil {
 			for _, p := range pools {
 				p.Close()
@@ -129,11 +154,26 @@ type PooledClient struct {
 	pooled *pooledCaller
 }
 
+// defaultCheckoutTimeout is what NewPooledClient uses when a caller
+// doesn't need to tune it directly (NewPool itself always takes an
+// explicit one — see e.g. the backpressure tests, which need a much
+// shorter timeout to stay fast). Derived from raft.HeartbeatInterval,
+// the same constant client.go's own retry loop paces its sleep against,
+// rather than an unrelated new magic number: comfortably longer than a
+// single heartbeat round (so a short, real burst has a real chance to
+// drain) while staying well under client.go's own outer retry cycle
+// (so an exhausted pool doesn't dominate a request's total latency
+// before the caller's retry loop gets a chance to try a different
+// server instead).
+const defaultCheckoutTimeout = 10 * raft.HeartbeatInterval
+
 // NewPooledClient returns a PooledClient addressing any of addrs, with
-// poolSize connections pre-dialed to EACH address. Call Close when
-// done to release every underlying connection.
+// poolSize connections pre-dialed to EACH address and
+// defaultCheckoutTimeout as every pool's backpressure bound (see
+// Pool's own doc comment). Call Close when done to release every
+// underlying connection.
 func NewPooledClient(addrs []string, poolSize int) (*PooledClient, error) {
-	pc, err := newPooledCaller(addrs, poolSize)
+	pc, err := newPooledCaller(addrs, poolSize, defaultCheckoutTimeout)
 	if err != nil {
 		return nil, err
 	}

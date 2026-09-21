@@ -31,12 +31,18 @@ Package: `pool` (import path `github.com/aksharraikanti/distsys-lab/03-connectio
       up post-restart but not the further lag through `applyPending`/
       `KVServer.applyLoop` before `Get` actually reflects it — made visible,
       not caused, by this stage's extra tests adding scheduler contention.
-- [ ] **Day 3 — Backpressure under exhaustion.** More concurrent requests than
+- [x] **Day 3 — Backpressure under exhaustion.** More concurrent requests than
       the pool has connections is the normal case under load, not an edge
       case — decide and implement what happens: block-and-wait with a bound
       (timeout or context cancellation), an overflow queue, or reject-and-let-
       the-caller-retry. Prove the choice holds under real concurrent load,
-      not just that it compiles.
+      not just that it compiles. Chose block-with-timeout (`checkoutTimeout`,
+      `ErrPoolExhausted`) over an overflow queue (just moves the problem —
+      unbounded memory instead of blocked goroutines) or immediate rejection
+      (treats "busy" the same as "broken," failing bursts it could have
+      absorbed) — a bound gives a real burst a real chance to drain while
+      still letting the caller's own retry loop fall back to a different
+      server rather than hang indefinitely.
 - [ ] **Day 4 — Health checking and eviction.** A pooled connection can go bad
       out from under the pool — the KV node behind it crashed or restarted
       (Stage 2's own fault injection is the natural source of this). Detect a
