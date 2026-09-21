@@ -16,11 +16,21 @@ Package: `pool` (import path `github.com/aksharraikanti/distsys-lab/03-connectio
       pooling yet — establishing the cold-start baseline every later day
       measures against: ~3.1ms/op (fresh dial + RPC, 3-node loopback cluster,
       Apple M2 Pro) via `BenchmarkNaiveClientPutAppend`.
-- [ ] **Day 2 — Naive fixed-size pool.** A pool of N already-dialed
+- [x] **Day 2 — Naive fixed-size pool.** A pool of N already-dialed
       connections, checked out before a request and checked back in after,
       reused across requests instead of dialing per call. Benchmark
       pooled-vs-cold-start latency for the same request volume — a concrete
-      before/after number, not just "pooling should be faster."
+      before/after number, not just "pooling should be faster." The concrete
+      numbers turned out to split cleanly by operation: PutAppend showed
+      almost no improvement (~3.1ms both ways) since a write's latency floor
+      is Raft's own replication round trip, not the client's connection
+      cost; Get — no Raft round trip underneath it — went from ~150-220μs
+      (fresh dial) to ~50-80μs (pooled), a genuine ~2-3x. Also found and
+      fixed a real (if latent) gap in Day 8's own whole-cluster-restart test
+      while stress-running the suite: it waited for `CommitIndex` to catch
+      up post-restart but not the further lag through `applyPending`/
+      `KVServer.applyLoop` before `Get` actually reflects it — made visible,
+      not caused, by this stage's extra tests adding scheduler contention.
 - [ ] **Day 3 — Backpressure under exhaustion.** More concurrent requests than
       the pool has connections is the normal case under load, not an edge
       case — decide and implement what happens: block-and-wait with a bound

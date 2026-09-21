@@ -244,10 +244,14 @@ func TestFullIntegrationSurvivesWholeClusterRestart(t *testing.T) {
 	// real AppendEntries replies reaching a majority again before it
 	// catches back up to what was actually committed pre-crash
 	// (noopLoop, Day 5, is exactly what closes this for KVServer's own
-	// reads once that happens). A single Get right after leader
-	// election can legitimately land before that catch-up finishes —
-	// wait for it explicitly rather than treating the very next RPC as
-	// authoritative.
+	// reads once that happens). This wait is necessary but NOT
+	// sufficient on its own, which the first version of this test
+	// found the hard way under extra scheduler contention: commitIndex
+	// catching up doesn't mean KVServer's own store has too — that
+	// still has to flow through Raft's applyPending (its own
+	// HeartbeatInterval-paced tick, lagging commitIndex by design) and
+	// then KVServer's applyLoop consuming ApplyCh. Waiting for
+	// commitIndex narrows the window; it doesn't close it.
 	waitFor(t, 20*raft.ElectionTimeoutMax, func() bool {
 		for _, rf := range restartedNodes {
 			if rf.CommitIndex() < preCrashCommit {
@@ -257,8 +261,16 @@ func TestFullIntegrationSurvivesWholeClusterRestart(t *testing.T) {
 		return true
 	})
 
+	// So the actual verification polls for the real, fully-caught-up
+	// outcome instead of trusting a single Get the instant commitIndex
+	// looks right — the same "wait for the observable result, not an
+	// intermediate implementation detail" approach every other
+	// eventual-convergence check in this codebase already uses.
 	freshCk := NewClerk(restartedKVs)
 	for key, v := range want {
+		waitFor(t, 20*raft.ElectionTimeoutMax, func() bool {
+			return freshCk.Get(key) == v
+		})
 		if got := freshCk.Get(key); got != v {
 			t.Fatalf("post-restart Get(%q) = %q, want %q (recovered from persisted log + snapshot)", key, got, v)
 		}
