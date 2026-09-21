@@ -44,7 +44,7 @@ func TestPoolIsActuallyFixedSize(t *testing.T) {
 	defer cleanup()
 
 	const size = 3
-	p, err := NewPool(addrs[0], size, time.Second)
+	p, err := NewPool(addrs[0], size, time.Second, time.Second)
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestPoolCallReturnsErrPoolExhaustedOnTimeout(t *testing.T) {
 	defer cleanup()
 
 	const checkoutTimeout = 30 * time.Millisecond
-	p, err := NewPool(addrs[0], 1, checkoutTimeout)
+	p, err := NewPool(addrs[0], 1, checkoutTimeout, time.Second)
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestPoolCallSucceedsIfConnectionFreesBeforeTimeout(t *testing.T) {
 	defer cleanup()
 
 	const checkoutTimeout = time.Second
-	p, err := NewPool(addrs[0], 1, checkoutTimeout)
+	p, err := NewPool(addrs[0], 1, checkoutTimeout, time.Second)
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestPooledClientHandlesMoreConcurrentCallersThanPoolSize(t *testing.T) {
 	// the Pool itself, under raw concurrent Call pressure, with no
 	// retry/dedup logic layered on top to obscure whether IT is what's
 	// making things work.
-	pool, err := NewPool(addrs[0], poolSize, time.Second)
+	pool, err := NewPool(addrs[0], poolSize, time.Second, time.Second)
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
