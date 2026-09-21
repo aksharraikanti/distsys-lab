@@ -185,6 +185,50 @@ _(fill this in as you learn — one section per day, in your own words.)_
   and `KVServer.Stop` already established, applied to a new kind of
   background work.
 
+### Day 5 — Idle eviction and pool sizing
+- `NewPool`'s signature had been quietly accumulating risk across Days
+  3-5: by the time this day started it took `(addr, size,
+  checkoutTimeout, redialInterval)`, and I was about to add a FIFTH
+  parameter (`idleTimeout`) — three `time.Duration`s in a row, which is
+  exactly the shape that makes a call site typo-swappable and silent
+  (the compiler can't catch `NewPool(addr, size, redialInterval,
+  checkoutTimeout)` — same types, wrong order). Replacing the parameter
+  list with a `PoolOptions` struct wasn't a stylistic preference, it
+  was fixing a real, now-actually-present risk, not a hypothetical
+  future one — the exact distinction that decides whether an
+  abstraction is premature or overdue.
+- Day 5's elasticity forced a real reconsideration of Day 4's own
+  guarantee, not just an addition on top of it. Day 4 said "a broken
+  connection is ALWAYS replaced" — correct and necessary for a
+  fixed-size pool, where every connection is load-bearing by
+  definition. But once the pool can legitimately hold MORE than it
+  strictly needs (grown under a since-passed burst), always replacing
+  a broken one above `MinSize` would mean the pool never actually
+  shrinks via breakage — only via idle timeout — which is an arbitrary,
+  unintended asymmetry between two things that should behave the same
+  way: "this connection isn't needed anymore." The fix was letting
+  `evictAndReplace` check `count < MinSize` before deciding to redial
+  at all, so a broken connection above the minimum just shrinks the
+  pool by one, same as an idle eviction would.
+- Growth and shrinkage turned out not to need coordinating with each
+  other explicitly, which I initially expected would be the hard part.
+  `count`, protected by one mutex, is the single source of truth both
+  `checkout`'s growth path and `evictIdleConnections`'s shrink path
+  read and write — as long as every path that changes how many
+  connections exist goes through the same counter under the same lock,
+  growth and shrinkage are just two independent forces pushing on the
+  same number, not two subsystems that need to know about each other.
+- Proving the load/idle/load cycle needed a real end-to-end test
+  (`TestPoolLoadIdleLoadCycle`, real concurrent `Call`s, not just raw
+  `checkout`/`checkin`) in addition to the two more surgical ones
+  (`TestPoolGrowsOnDemandUpToMaxSize`, `TestPoolShrinksIdleConnectionsDownToMinSize`).
+  The surgical tests prove the mechanism works in isolation; the cycle
+  test is what actually matches Day 5's own stated goal — and it's
+  also the one that would have caught a regression where the pool
+  shrinks once and then, wrongly, never grows back (an easy bug to
+  introduce if the growth path ever assumed "we're already at some
+  size" instead of re-checking the CURRENT count every time).
+
 _(continue per day)_
 
 ## Reference material

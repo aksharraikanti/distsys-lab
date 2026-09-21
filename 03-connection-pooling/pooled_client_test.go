@@ -3,13 +3,27 @@ package pool
 import (
 	"errors"
 	"fmt"
-	"net/rpc"
 	"sync"
 	"testing"
 	"time"
 
 	kvstore "github.com/aksharraikanti/distsys-lab/02-kv-store"
 )
+
+// testPoolOptions returns fixed-size (MinSize == MaxSize == size)
+// PoolOptions with generous timeouts — for tests that aren't
+// specifically exercising backpressure, eviction, or idle-sizing
+// timing, so those tests aren't accidentally sensitive to unrelated
+// background behavior (growth, idle eviction, redial pacing).
+func testPoolOptions(size int) PoolOptions {
+	return PoolOptions{
+		MinSize:         size,
+		MaxSize:         size,
+		CheckoutTimeout: time.Second,
+		RedialInterval:  time.Second,
+		IdleTimeout:     time.Hour,
+	}
+}
 
 // TestPooledClientRoundTrip is the pooled counterpart to Day 1's own
 // TestNaiveClientRoundTrip: same Put/Append/Get correctness, this time
@@ -18,7 +32,7 @@ func TestPooledClientRoundTrip(t *testing.T) {
 	addrs, cleanup := tcpKVCluster(t, 3)
 	defer cleanup()
 
-	c, err := NewPooledClient(addrs, 2)
+	c, err := NewPooledClient(addrs, 2, 2)
 	if err != nil {
 		t.Fatalf("NewPooledClient: %v", err)
 	}
@@ -44,7 +58,7 @@ func TestPoolIsActuallyFixedSize(t *testing.T) {
 	defer cleanup()
 
 	const size = 3
-	p, err := NewPool(addrs[0], size, time.Second, time.Second)
+	p, err := NewPool(addrs[0], testPoolOptions(size))
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -54,7 +68,7 @@ func TestPoolIsActuallyFixedSize(t *testing.T) {
 		t.Fatalf("len(p.free) after NewPool = %d, want %d", got, size)
 	}
 
-	checkedOut := make([]*rpc.Client, size)
+	checkedOut := make([]*pooledConn, size)
 	for i := 0; i < size; i++ {
 		checkedOut[i] = <-p.free
 	}
@@ -64,7 +78,7 @@ func TestPoolIsActuallyFixedSize(t *testing.T) {
 
 	// A (size+1)th checkout must block, not error or hand out a
 	// duplicate/nil connection.
-	extraCh := make(chan *rpc.Client, 1)
+	extraCh := make(chan *pooledConn, 1)
 	go func() { extraCh <- <-p.free }()
 
 	select {
@@ -102,7 +116,9 @@ func TestPoolCallReturnsErrPoolExhaustedOnTimeout(t *testing.T) {
 	defer cleanup()
 
 	const checkoutTimeout = 30 * time.Millisecond
-	p, err := NewPool(addrs[0], 1, checkoutTimeout, time.Second)
+	opts := testPoolOptions(1)
+	opts.CheckoutTimeout = checkoutTimeout
+	p, err := NewPool(addrs[0], opts)
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -140,8 +156,7 @@ func TestPoolCallSucceedsIfConnectionFreesBeforeTimeout(t *testing.T) {
 	addrs, cleanup := tcpKVCluster(t, 1)
 	defer cleanup()
 
-	const checkoutTimeout = time.Second
-	p, err := NewPool(addrs[0], 1, checkoutTimeout, time.Second)
+	p, err := NewPool(addrs[0], testPoolOptions(1))
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -179,7 +194,7 @@ func TestPooledClientHandlesMoreConcurrentCallersThanPoolSize(t *testing.T) {
 	// the Pool itself, under raw concurrent Call pressure, with no
 	// retry/dedup logic layered on top to obscure whether IT is what's
 	// making things work.
-	pool, err := NewPool(addrs[0], poolSize, time.Second, time.Second)
+	pool, err := NewPool(addrs[0], testPoolOptions(poolSize))
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -226,7 +241,7 @@ func TestPooledClientHandlesMoreConcurrentCallersThanPoolSize(t *testing.T) {
 		cwg.Add(1)
 		go func(clientNum int) {
 			defer cwg.Done()
-			c, err := NewPooledClient(addrs, poolSize)
+			c, err := NewPooledClient(addrs, poolSize, poolSize)
 			if err != nil {
 				cerrs <- fmt.Errorf("client %d: NewPooledClient: %v", clientNum, err)
 				return
@@ -265,7 +280,7 @@ func BenchmarkPooledClientPutAppend(b *testing.B) {
 	addrs, cleanup := benchTCPKVCluster(b, 3)
 	defer cleanup()
 
-	c, err := NewPooledClient(addrs, 4)
+	c, err := NewPooledClient(addrs, 4, 4)
 	if err != nil {
 		b.Fatalf("NewPooledClient: %v", err)
 	}
@@ -287,7 +302,7 @@ func BenchmarkPooledClientGet(b *testing.B) {
 	addrs, cleanup := benchTCPKVCluster(b, 3)
 	defer cleanup()
 
-	c, err := NewPooledClient(addrs, 4)
+	c, err := NewPooledClient(addrs, 4, 4)
 	if err != nil {
 		b.Fatalf("NewPooledClient: %v", err)
 	}

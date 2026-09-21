@@ -57,11 +57,19 @@ Package: `pool` (import path `github.com/aksharraikanti/distsys-lab/03-connectio
       retrying every `redialInterval` — without blocking the caller who
       discovered the break, and without leaving the pool permanently short a
       connection once the node comes back.
-- [ ] **Day 5 — Idle eviction and pool sizing.** Reuse-vs-cold-start cuts both
+- [x] **Day 5 — Idle eviction and pool sizing.** Reuse-vs-cold-start cuts both
       ways: an idle connection held open forever wastes resources on both
       ends. Close connections that sit idle past a threshold; make min/max
       pool size configurable rather than a single hardcoded N, and prove the
       pool actually shrinks and regrows across a load/idle/load cycle.
+      `NewPool` grew enough same-typed (`time.Duration`) parameters across
+      Days 3-5 that positional args became a real footgun, not a
+      hypothetical one — replaced with a `PoolOptions` struct. Also revised
+      Day 4's "always replace a broken connection" guarantee: above
+      `MinSize`, a broken connection just shrinks the pool by one now
+      (exactly like an idle eviction would) rather than always triggering an
+      immediate redial — elasticity makes "always replace" the wrong default
+      once the pool can legitimately be larger than it needs to be.
 - [ ] **Day 6 — Load test through real faults.** Combine Stage 2's own
       concurrent-client and fault-injection patterns (Day 5/Day 8's tests)
       with the pool sitting in between: concurrent callers hammering the pool
