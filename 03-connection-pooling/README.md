@@ -105,6 +105,44 @@ _(fill this in as you learn — one section per day, in your own words.)_
   layers (Day 8's own README notes already named the shallower version
   of this same gap; this was the version underneath it).
 
+### Day 3 — Backpressure under exhaustion
+- Naming the three real options before picking one made the choice
+  easy rather than arbitrary. An overflow queue sounds like it "fixes"
+  exhaustion, but it doesn't — it just relocates the problem from
+  blocked goroutines (bounded, visible, and something the caller can
+  time out on) to unbounded queue growth (no natural backpressure at
+  all, and a very different failure mode under sustained overload).
+  Immediate rejection is honest about failing fast, but it can't tell
+  "busy for 2ms because of a normal burst" from "actually broken," and
+  punishes the former as harshly as the latter. Block-with-timeout is
+  the only one of the three that actually bounds BOTH the wait and the
+  resource usage at once — that's not a compromise between the other
+  two, it's a strictly better shape for this specific problem.
+- Threading `checkoutTimeout` through `NewPool`/`NewPooledClient`
+  turned what was an implicit behavior (Day 2's `<-p.free` blocking
+  forever, correct by accident rather than by design) into something
+  the type signature itself now forces every caller to decide on. That
+  friction is the point, not a downside — Day 2's own doc comment had
+  already flagged the unbounded block as "not yet a deliberate policy,"
+  and a required constructor argument is what actually makes it one.
+- `defaultCheckoutTimeout` is derived from `raft.HeartbeatInterval` (10x
+  it) rather than an unrelated new magic number, for the same reason
+  `client.go`'s own retry sleep already uses that constant: it needs to
+  be long enough that a real, short burst (on the order of a heartbeat
+  round) has a genuine chance to drain, but short enough that an
+  exhausted pool doesn't dominate a request's total latency before the
+  caller's OWN retry loop gets a chance to fall back to a different
+  server. The two timeouts (pool checkout, client retry cycle) aren't
+  independent numbers — picking one without the other in mind would
+  have been guessing.
+- Testing this needed two different timeout scales in the same file:
+  a SHORT one (30ms) to prove `ErrPoolExhausted` actually fires within
+  a bounded, predictable window without making the test itself slow,
+  and a GENEROUS one (1s) for the tests that are really about
+  correctness under contention, not about timing — where a short
+  timeout would just make the test flaky for a reason that has nothing
+  to do with what it's supposed to be proving.
+
 _(continue per day)_
 
 ## Reference material

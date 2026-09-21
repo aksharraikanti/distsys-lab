@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"errors"
 	"fmt"
 	"net/rpc"
 	"sync"
@@ -43,7 +44,7 @@ func TestPoolIsActuallyFixedSize(t *testing.T) {
 	defer cleanup()
 
 	const size = 3
-	p, err := NewPool(addrs[0], size)
+	p, err := NewPool(addrs[0], size, time.Second)
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -90,6 +91,74 @@ func TestPoolIsActuallyFixedSize(t *testing.T) {
 	}
 }
 
+// TestPoolCallReturnsErrPoolExhaustedOnTimeout is Day 3's headline
+// proof: with every connection held elsewhere, Call must give up and
+// report ErrPoolExhausted once checkoutTimeout passes — not block
+// forever (Day 2's implicit behavior) and not error out instantly
+// either (a genuinely short-lived burst deserves a real chance to
+// drain first).
+func TestPoolCallReturnsErrPoolExhaustedOnTimeout(t *testing.T) {
+	addrs, cleanup := tcpKVCluster(t, 1)
+	defer cleanup()
+
+	const checkoutTimeout = 30 * time.Millisecond
+	p, err := NewPool(addrs[0], 1, checkoutTimeout)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	defer p.Close()
+
+	// Hold the only connection for the whole test — nothing ever
+	// returns it, so any Call has no choice but to wait out the full
+	// checkoutTimeout.
+	held := <-p.free
+	defer func() { p.free <- held }()
+
+	start := time.Now()
+	var reply kvstore.GetReply
+	err = p.Call("KVServer.Get", &kvstore.GetArgs{Key: "x"}, &reply)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrPoolExhausted) {
+		t.Fatalf("Call with the pool fully held = %v, want ErrPoolExhausted", err)
+	}
+	if elapsed < checkoutTimeout {
+		t.Fatalf("Call returned after %s, want it to have waited at least checkoutTimeout (%s)", elapsed, checkoutTimeout)
+	}
+	// Generous upper bound — this is checking Call didn't give up
+	// early, not pinning down exact scheduler timing.
+	if elapsed > 10*checkoutTimeout {
+		t.Fatalf("Call took %s, want close to checkoutTimeout (%s), not way beyond it", elapsed, checkoutTimeout)
+	}
+}
+
+// TestPoolCallSucceedsIfConnectionFreesBeforeTimeout proves the OTHER
+// half: a caller that only has to wait a SHORT while (well under
+// checkoutTimeout) for a connection to free up must succeed normally,
+// not spuriously time out just because it had to wait at all.
+func TestPoolCallSucceedsIfConnectionFreesBeforeTimeout(t *testing.T) {
+	addrs, cleanup := tcpKVCluster(t, 1)
+	defer cleanup()
+
+	const checkoutTimeout = time.Second
+	p, err := NewPool(addrs[0], 1, checkoutTimeout)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	defer p.Close()
+
+	held := <-p.free
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		p.free <- held
+	}()
+
+	var reply kvstore.GetReply
+	if err := p.Call("KVServer.Get", &kvstore.GetArgs{Key: "x"}, &reply); err != nil {
+		t.Fatalf("Call after a brief wait = %v, want it to succeed once the connection freed up", err)
+	}
+}
+
 // TestPooledClientHandlesMoreConcurrentCallersThanPoolSize is Day 2's
 // real correctness proof: a pool smaller than the number of concurrent
 // callers must still let every caller eventually succeed — checkout
@@ -110,7 +179,7 @@ func TestPooledClientHandlesMoreConcurrentCallersThanPoolSize(t *testing.T) {
 	// the Pool itself, under raw concurrent Call pressure, with no
 	// retry/dedup logic layered on top to obscure whether IT is what's
 	// making things work.
-	pool, err := NewPool(addrs[0], poolSize)
+	pool, err := NewPool(addrs[0], poolSize, time.Second)
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}

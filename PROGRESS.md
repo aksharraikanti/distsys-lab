@@ -1,10 +1,10 @@
 # Progress
 
 Current stage: **03-connection-pooling**
-Current day: **Day 3 — Backpressure under exhaustion** (next up)
+Current day: **Day 4 — Health checking and eviction** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
-Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-2 complete.
+Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-3 complete.
 
 ## Log
 
@@ -265,3 +265,13 @@ Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-2 complete.
   for `CommitIndex` to catch up post-restart but not the further lag
   through `applyPending`/`KVServer.applyLoop` before `Get` actually
   reflects it — fixed by polling the real observable outcome instead.
+- 2026-09-21 — Day 3 (Backpressure under exhaustion) complete: `Pool.Call`
+  now blocks up to a `checkoutTimeout` before returning `ErrPoolExhausted`,
+  replacing Day 2's implicit unbounded block with a deliberate, tested
+  policy — chosen over an overflow queue (just relocates unbounded growth
+  rather than bounding it) or immediate rejection (treats "busy" the same
+  as "broken," failing a burst it could have absorbed).
+  `defaultCheckoutTimeout` is derived from `raft.HeartbeatInterval` (10x
+  it), matching `client.go`'s own retry-sleep constant, so the pool's wait
+  and the client's own retry cycle aren't picked independently of each
+  other.
