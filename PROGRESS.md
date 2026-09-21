@@ -1,10 +1,10 @@
 # Progress
 
 Current stage: **03-connection-pooling**
-Current day: **Day 5 — Idle eviction and pool sizing** (next up)
+Current day: **Day 6 — Load test through real faults** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
-Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-4 complete.
+Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-5 complete.
 
 ## Log
 
@@ -292,3 +292,20 @@ Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-4 complete.
   already-accepted `net/rpc` connections — simulating a broken connection
   has to happen client-side to be realistic at all. 25/25 clean isolated
   pool-test runs and 20/20 clean full-suite runs under `-race`.
+- 2026-09-21 — Day 5 (Idle eviction and pool sizing) complete: `Pool` is
+  now elastic between `MinSize`/`MaxSize` instead of a single fixed count —
+  `checkout` dials a fresh connection on demand when nothing's idle and
+  there's still room under `MaxSize`, and a background evictor closes
+  connections above `MinSize` that have sat idle past `IdleTimeout`.
+  `NewPool` grew enough same-typed `time.Duration` parameters across Days
+  3-5 to become a real (not hypothetical) footgun — replaced with a
+  `PoolOptions` struct. Also revised Day 4's "always replace a broken
+  connection" guarantee: above `MinSize`, a broken connection now just
+  shrinks the pool by one instead of always triggering a redial —
+  elasticity makes "always replace" the wrong default once the pool can
+  legitimately be larger than it strictly needs. Proved growth, shrinkage,
+  and regrowth both in isolation and through a real load/idle/load cycle
+  with actual concurrent `Call` traffic. 30/30 clean isolated pool-test
+  runs and 20/20 clean full-suite runs under `-race` (one pre-existing,
+  already-documented Stage 1 flake — `TestHeartbeatsKeepLeaderStable` —
+  unrelated to this day, seen once).

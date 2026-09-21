@@ -52,7 +52,9 @@ func TestPoolEvictsBrokenConnectionAndReplacesIt(t *testing.T) {
 	defer l.Close()
 	defer cleanup()
 
-	p, err := NewPool(addr, 1, time.Second, 10*time.Millisecond)
+	opts := testPoolOptions(1)
+	opts.RedialInterval = 10 * time.Millisecond
+	p, err := NewPool(addr, opts)
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -63,7 +65,7 @@ func TestPoolEvictsBrokenConnectionAndReplacesIt(t *testing.T) {
 	// the same shape a real broken connection sitting in the free list
 	// would have.
 	broken := <-p.free
-	broken.Close()
+	broken.client.Close()
 	p.free <- broken
 
 	var reply kvstore.GetReply
@@ -88,7 +90,9 @@ func TestPoolRecoversAfterNodeBecomesUnreachableThenComesBack(t *testing.T) {
 	defer cleanup()
 
 	const redialInterval = 15 * time.Millisecond
-	p, err := NewPool(addr, 1, time.Second, redialInterval)
+	opts := testPoolOptions(1)
+	opts.RedialInterval = redialInterval
+	p, err := NewPool(addr, opts)
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
 	}
@@ -109,7 +113,7 @@ func TestPoolRecoversAfterNodeBecomesUnreachableThenComesBack(t *testing.T) {
 	// a real crash produces regardless of the underlying cause.
 	l.Close()
 	broken := <-p.free
-	broken.Close()
+	broken.client.Close()
 	p.free <- broken
 
 	if err := p.Call("KVServer.Get", &kvstore.GetArgs{Key: "x"}, &reply); err == nil {
