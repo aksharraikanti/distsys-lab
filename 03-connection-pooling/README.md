@@ -143,6 +143,48 @@ _(fill this in as you learn — one section per day, in your own words.)_
   timeout would just make the test flaky for a reason that has nothing
   to do with what it's supposed to be proving.
 
+### Day 4 — Health checking and eviction
+- Distinguishing "this connection is broken" from "this call got a
+  perfectly normal not-the-leader answer" turned out to need zero
+  actual logic, once I looked at what `net/rpc.Client.Call` and
+  `02-kv-store`'s own RPC contract actually guarantee together:
+  `KVServer.Get`/`PutAppend` NEVER return a non-nil Go `error` — every
+  outcome, including "wrong leader," travels through `reply.Err`
+  instead. So any non-nil `error` `Call` itself returns can only be a
+  transport-level failure. No error-type inspection, no string
+  matching on `rpc.ErrShutdown` — just "err != nil means evict." That
+  simplicity isn't an accident of this stage; it's a direct payoff of a
+  design decision Stage 2 made back on Day 2 for an unrelated reason
+  (distinguishing "not committed yet" from "not leader" cleanly), now
+  reused for something Stage 2 never anticipated.
+- Testing "the pool recovers once a crashed node comes back" needed a
+  genuinely realistic way to simulate a broken connection, and the
+  first idea (`l.Close()` on the server's listener) turned out to be
+  wrong: closing a `net.Listener` only stops ACCEPTING new connections
+  — `net/rpc`'s already-accepted connections keep being served by their
+  own goroutines, completely unaffected. An already-established pooled
+  connection would have kept working fine even after "crashing" the
+  server this way. The fix was closing the connection directly,
+  client-side — which is actually MORE realistic, not a shortcut: in
+  a real crash, the client never gets an authoritative "the server is
+  gone" signal either, it just observes its own read/write failing,
+  which is exactly what closing the client's own `*rpc.Client` produces.
+- The background `redialUntilSuccess` goroutine is the one piece of
+  real concurrency machinery this stage has needed so far, and it
+  earns its complexity by closing a correctness gap that a simpler
+  "retry once, give up" design would have left open: Stage 2's fault
+  injection holds a crashed node down for real time (not an instant),
+  so a caller that only retries the redial once, synchronously, while
+  the node is down would leave the pool permanently one connection
+  short — repeat that for every connection in the pool and it ends up
+  at zero, forever, even after the node recovers. That's not a
+  theoretical concern; Day 6's own "the pool recovers... once the node
+  comes back" requirement depends directly on this NOT happening. Close
+  needed its own `stopCh`/`sync.WaitGroup` specifically to shut this
+  goroutine down cleanly — the same shape `raft.Raft.StopElectionTimer`
+  and `KVServer.Stop` already established, applied to a new kind of
+  background work.
+
 _(continue per day)_
 
 ## Reference material

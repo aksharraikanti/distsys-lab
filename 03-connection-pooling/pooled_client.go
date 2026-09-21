@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/rpc"
+	"sync"
 	"time"
 
 	raft "github.com/aksharraikanti/distsys-lab/01-raft"
@@ -37,21 +38,38 @@ var ErrPoolExhausted = errors.New("pool: no connection became available before t
 // requests it could easily have absorbed. A bounded wait gives a real
 // burst a real chance to drain while still failing fast enough that the
 // caller's own retry loop (client.go) can fall back to a different
-// server rather than hang behind this one indefinitely. Day 4 adds
-// detecting and replacing a connection that's gone bad, not just busy.
+// server rather than hang behind this one indefinitely.
+//
+// Day 4 adds detecting and replacing a connection that's gone bad, not
+// just busy (the KV node behind it crashed or restarted — Stage 2's own
+// fault injection is exactly this scenario). stopCh/wg exist only for
+// that: a redial that fails immediately (the node is still down) hands
+// off to a background goroutine that keeps retrying rather than either
+// blocking the caller who discovered the break or leaving the pool
+// permanently short one connection forever — Close needs to know about
+// and wait for those goroutines before it drains/closes free, or a
+// redial could try to send on a closed channel.
 type Pool struct {
 	addr            string
 	free            chan *rpc.Client
 	checkoutTimeout time.Duration
+	redialInterval  time.Duration
+
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 // NewPool dials size connections to addr up front and returns a Pool
 // ready to hand them out, waiting up to checkoutTimeout for a
 // connection to free up on each Call before reporting
-// ErrPoolExhausted. If any dial fails, every connection already
-// established is closed before returning the error — a partially
-// initialized pool would be a silent resource leak, not a smaller pool.
-func NewPool(addr string, size int, checkoutTimeout time.Duration) (*Pool, error) {
+// ErrPoolExhausted, and retrying every redialInterval to replace a
+// connection that couldn't be immediately re-established after going
+// bad (see evictAndReplace). If any dial fails, every connection
+// already established is closed before returning the error — a
+// partially initialized pool would be a silent resource leak, not a
+// smaller pool.
+func NewPool(addr string, size int, checkoutTimeout, redialInterval time.Duration) (*Pool, error) {
 	conns := make([]*rpc.Client, 0, size)
 	for i := 0; i < size; i++ {
 		c, err := rpc.Dial("tcp", addr)
@@ -67,17 +85,33 @@ func NewPool(addr string, size int, checkoutTimeout time.Duration) (*Pool, error
 	for _, c := range conns {
 		free <- c
 	}
-	return &Pool{addr: addr, free: free, checkoutTimeout: checkoutTimeout}, nil
+	return &Pool{
+		addr:            addr,
+		free:            free,
+		checkoutTimeout: checkoutTimeout,
+		redialInterval:  redialInterval,
+		stopCh:          make(chan struct{}),
+	}, nil
 }
 
 // Call checks out a connection (waiting up to checkoutTimeout — see
-// ErrPoolExhausted), makes the RPC, and checks the connection back in —
-// even on error. A naive fixed-size pool doesn't yet distinguish a
-// transient RPC-level error (the KV server replying ErrWrongLeader,
-// say — a perfectly healthy connection, just to the wrong node) from a
-// genuinely broken connection; that distinction, and evicting/
-// replacing a connection that's actually dead, is Day 4's job. For now
-// every checked-out connection always comes back to the free list.
+// ErrPoolExhausted) and makes the RPC. A connection that served the
+// call successfully — at the TRANSPORT level, regardless of what the
+// call's own application-level outcome was — goes straight back to the
+// free list. One that failed is evicted and replaced instead (see
+// evictAndReplace); the error from THIS call is still returned to the
+// caller either way, so a failure is never silently swallowed.
+//
+// Distinguishing "transport failure" from "application-level outcome"
+// needs no special-casing here: every RPC this pool ever makes
+// (KVServer.Get/PutAppend) always returns a nil Go error — the actual
+// outcome (success, wrong leader, no such key, ...) travels through
+// reply.Err instead (see 02-kv-store/rpc.go's Err type). So any
+// non-nil error c.Call itself returns is necessarily a transport-level
+// problem — a dropped connection, the node behind it having crashed or
+// restarted (Stage 2's own fault injection is exactly this scenario) —
+// never a "wrong leader" outcome, which never surfaces as a Go error at
+// all.
 func (p *Pool) Call(method string, args, reply interface{}) error {
 	var c *rpc.Client
 	select {
@@ -85,16 +119,73 @@ func (p *Pool) Call(method string, args, reply interface{}) error {
 	case <-time.After(p.checkoutTimeout):
 		return ErrPoolExhausted
 	}
-	defer func() { p.free <- c }()
-	return c.Call(method, args, reply)
+
+	err := c.Call(method, args, reply)
+	if err != nil {
+		p.evictAndReplace(c)
+		return err
+	}
+	p.free <- c
+	return nil
+}
+
+// evictAndReplace closes a connection that just failed and tries to
+// put a working replacement back in its place, so the caller who
+// discovered the break isn't the one left blocking on redialing it. If
+// an IMMEDIATE redial succeeds (the common case — a stale connection to
+// a node that's actually fine), the replacement goes straight into the
+// free list and the pool never even shrinks. If it fails (the node is
+// genuinely still down), a background goroutine keeps retrying every
+// redialInterval — WITHOUT blocking this or any other caller — until it
+// succeeds or Close stops it; until then, the pool is simply one
+// connection short, which checkoutTimeout-driven backpressure (Day 3)
+// already handles correctly on its own.
+func (p *Pool) evictAndReplace(broken *rpc.Client) {
+	broken.Close()
+	if c, err := rpc.Dial("tcp", p.addr); err == nil {
+		p.free <- c
+		return
+	}
+	p.wg.Add(1)
+	go p.redialUntilSuccess()
+}
+
+func (p *Pool) redialUntilSuccess() {
+	defer p.wg.Done()
+	ticker := time.NewTicker(p.redialInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-ticker.C:
+			c, err := rpc.Dial("tcp", p.addr)
+			if err != nil {
+				continue
+			}
+			select {
+			case p.free <- c:
+				return
+			case <-p.stopCh:
+				c.Close()
+				return
+			}
+		}
+	}
 }
 
 // Close closes every connection currently in the pool. Callers must
 // not still have a connection checked out via Call when Close runs —
 // the same "no more calls in flight" precondition every Stop/Close in
 // this codebase already relies on its caller to uphold (see
-// 02-kv-store's KVServer.Stop, 01-raft's StopElectionTimer).
+// 02-kv-store's KVServer.Stop, 01-raft's StopElectionTimer). Stops any
+// background redialUntilSuccess goroutine (Day 4) and waits for it to
+// actually exit BEFORE draining/closing free — otherwise a redial
+// mid-flight could try to send on an already-closed channel.
 func (p *Pool) Close() error {
+	p.stopOnce.Do(func() { close(p.stopCh) })
+	p.wg.Wait()
+
 	close(p.free)
 	var firstErr error
 	for c := range p.free {
@@ -116,10 +207,10 @@ type pooledCaller struct {
 	pools map[string]*Pool
 }
 
-func newPooledCaller(addrs []string, size int, checkoutTimeout time.Duration) (*pooledCaller, error) {
+func newPooledCaller(addrs []string, size int, checkoutTimeout, redialInterval time.Duration) (*pooledCaller, error) {
 	pools := make(map[string]*Pool, len(addrs))
 	for _, addr := range addrs {
-		p, err := NewPool(addr, size, checkoutTimeout)
+		p, err := NewPool(addr, size, checkoutTimeout, redialInterval)
 		if err != nil {
 			for _, p := range pools {
 				p.Close()
@@ -167,13 +258,24 @@ type PooledClient struct {
 // server instead).
 const defaultCheckoutTimeout = 10 * raft.HeartbeatInterval
 
+// defaultRedialInterval paces how often a Pool retries replacing a
+// connection it couldn't immediately re-establish (Day 4). Derived
+// from raft.ElectionTimeoutMin rather than an unrelated new number:
+// fast enough that the pool recovers promptly once a crashed node
+// comes back — Stage 2's own fault-injection tests typically hold a
+// node down for a couple of raft.ElectionTimeoutMax, so several retries
+// fit comfortably inside that window — without hammering a node that's
+// still genuinely down with a new connection attempt every couple of
+// milliseconds.
+const defaultRedialInterval = raft.ElectionTimeoutMin
+
 // NewPooledClient returns a PooledClient addressing any of addrs, with
-// poolSize connections pre-dialed to EACH address and
-// defaultCheckoutTimeout as every pool's backpressure bound (see
-// Pool's own doc comment). Call Close when done to release every
-// underlying connection.
+// poolSize connections pre-dialed to EACH address, defaultCheckoutTimeout
+// as every pool's backpressure bound, and defaultRedialInterval as its
+// broken-connection retry pace (see Pool's own doc comment for both).
+// Call Close when done to release every underlying connection.
 func NewPooledClient(addrs []string, poolSize int) (*PooledClient, error) {
-	pc, err := newPooledCaller(addrs, poolSize, defaultCheckoutTimeout)
+	pc, err := newPooledCaller(addrs, poolSize, defaultCheckoutTimeout, defaultRedialInterval)
 	if err != nil {
 		return nil, err
 	}

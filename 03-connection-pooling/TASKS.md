@@ -43,12 +43,20 @@ Package: `pool` (import path `github.com/aksharraikanti/distsys-lab/03-connectio
       absorbed) — a bound gives a real burst a real chance to drain while
       still letting the caller's own retry loop fall back to a different
       server rather than hang indefinitely.
-- [ ] **Day 4 — Health checking and eviction.** A pooled connection can go bad
+- [x] **Day 4 — Health checking and eviction.** A pooled connection can go bad
       out from under the pool — the KV node behind it crashed or restarted
       (Stage 2's own fault injection is the natural source of this). Detect a
       broken connection (a failed call, not just a missing heartbeat) and
       evict + replace it rather than handing a known-bad connection to the
-      next caller.
+      next caller. Detection needed no special-casing: every RPC this pool
+      makes always returns a nil Go error (outcomes travel through
+      `reply.Err` instead), so ANY non-nil error `c.Call` itself returns is
+      necessarily transport-level, never a "wrong leader" outcome. A redial
+      that fails immediately (the node is genuinely still down, not just a
+      stale connection) hands off to a background goroutine that keeps
+      retrying every `redialInterval` — without blocking the caller who
+      discovered the break, and without leaving the pool permanently short a
+      connection once the node comes back.
 - [ ] **Day 5 — Idle eviction and pool sizing.** Reuse-vs-cold-start cuts both
       ways: an idle connection held open forever wastes resources on both
       ends. Close connections that sit idle past a threshold; make min/max

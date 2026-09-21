@@ -1,10 +1,10 @@
 # Progress
 
 Current stage: **03-connection-pooling**
-Current day: **Day 4 — Health checking and eviction** (next up)
+Current day: **Day 5 — Idle eviction and pool sizing** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
-Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-3 complete.
+Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-4 complete.
 
 ## Log
 
@@ -275,3 +275,20 @@ Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-3 complete.
   it), matching `client.go`'s own retry-sleep constant, so the pool's wait
   and the client's own retry cycle aren't picked independently of each
   other.
+- 2026-09-23 — Day 4 (Health checking and eviction) complete: `Pool.Call`
+  now evicts and replaces a connection that failed at the transport level,
+  instead of always returning it to the free list. Detection needed no
+  special-casing — `KVServer.Get`/`PutAppend` never return a non-nil Go
+  error (outcomes travel through `reply.Err`), so any error `Call` itself
+  returns is necessarily transport-level. A redial that fails immediately
+  (the node genuinely still down, not just a stale connection) hands off to
+  a background `redialUntilSuccess` goroutine, paced by
+  `defaultRedialInterval` (`raft.ElectionTimeoutMin`) — without it, a node
+  held down for real time (Stage 2's own fault injection) could leave the
+  pool permanently short a connection even after the node recovered.
+  `Close` gained its own `stopCh`/`sync.WaitGroup` to shut that goroutine
+  down cleanly before draining the free-list channel. Also found, while
+  writing the recovery test, that closing a `net.Listener` does NOT affect
+  already-accepted `net/rpc` connections — simulating a broken connection
+  has to happen client-side to be realistic at all. 25/25 clean isolated
+  pool-test runs and 20/20 clean full-suite runs under `-race`.
