@@ -51,6 +51,60 @@ _(fill this in as you learn — one section per day, in your own words.)_
   real, not theoretical, which is exactly the number the rest of this
   stage needs to actually move.
 
+### Day 2 — Naive fixed-size pool
+- Building `NaiveClient` and `PooledClient` back to back is what made
+  factoring out the shared retry/dedup logic (round-robin from
+  `lastKnown`, retry on `ErrWrongLeader`, ClientID+SeqNum) an easy call
+  rather than a judgment call: Day 1's own README note had already
+  observed it was transport-agnostic, and writing a SECOND client that
+  would otherwise duplicate it verbatim is exactly the point where
+  "three similar lines" turns into "a whole retry loop copy-pasted a
+  second time." The one axis that actually varies — how a single RPC
+  gets made — is now a one-method `caller` interface
+  (`dialPerCallCaller` vs `pooledCaller`), and both `NaiveClient` and
+  `PooledClient` are thin wrappers over the same shared `client`.
+- The benchmark comparison split cleanly by operation, and the split
+  itself is the real finding, not just the numbers: `PutAppend` showed
+  almost no improvement from pooling (~3.1ms either way), while `Get`
+  improved roughly 2-3x (~150-220μs down to ~50-80μs). The reason once
+  I looked: `PutAppend` goes through `Propose` and has to wait for the
+  entry to replicate to a majority before it can return — a real
+  network round trip to the other Raft nodes that's at least one
+  `HeartbeatInterval`, dwarfing whatever a client's own connection
+  setup costs. `Get` (per 02-kv-store's own doc comment) is a direct
+  local read once a node believes itself leader — no Raft round trip at
+  all — so the CLIENT's connection cost is almost the entire story,
+  and reusing a connection has real, visible room to matter. A
+  benchmark that only measured writes would have made pooling look
+  nearly pointless; measuring both is what actually shows what it's
+  for.
+- `PooledClient` inherits the exact same "not safe for concurrent use"
+  contract `Clerk` (02-kv-store) already documents, for the identical
+  reason (`seqNum`/`lastKnown` aren't synchronized) — and I re-learned
+  this the hard way, not just by remembering it: an early version of
+  `TestPooledClientHandlesMoreConcurrentCallersThanPoolSize` shared ONE
+  `PooledClient` across several goroutines and `-race` caught the
+  corruption immediately. Split the test into two levels instead: raw
+  concurrent `Pool.Call` pressure (proving the pool itself handles
+  contention safely) and a SEPARATE check with one `PooledClient` per
+  goroutine (proving the higher-level retry logic still works under
+  the same load) — conflating the two would have tested something
+  murkier than either property on its own.
+- Stress-running the whole suite repeatedly while validating this day
+  surfaced a real, if narrow, gap in Day 8's own
+  `TestFullIntegrationSurvivesWholeClusterRestart` (02-kv-store): it
+  waited for `CommitIndex` to catch up after a simulated restart, but
+  commitIndex catching up doesn't mean `KVServer.store` has — that
+  still has to flow through Raft's own `applyPending` (its own
+  `HeartbeatInterval`-paced lag behind commitIndex, by design) and then
+  `KVServer.applyLoop` consuming `ApplyCh`. The fix was to poll the
+  actual observable outcome (`Get` returning the expected value) rather
+  than an intermediate implementation detail one hop removed from what
+  actually mattered — the same "wait for the real thing, not a proxy
+  for it" lesson this whole project keeps relearning at different
+  layers (Day 8's own README notes already named the shallower version
+  of this same gap; this was the version underneath it).
+
 _(continue per day)_
 
 ## Reference material

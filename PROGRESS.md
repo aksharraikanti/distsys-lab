@@ -1,10 +1,10 @@
 # Progress
 
 Current stage: **03-connection-pooling**
-Current day: **Day 2 — Naive fixed-size pool** (next up)
+Current day: **Day 3 — Backpressure under exhaustion** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
-Stage 3 (Connection pooling layer) scoped into 6 days, Day 1 complete.
+Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-2 complete.
 
 ## Log
 
@@ -247,3 +247,21 @@ Stage 3 (Connection pooling layer) scoped into 6 days, Day 1 complete.
   already treats an unreachable peer. `BenchmarkNaiveClientPutAppend`
   measures the cold-start baseline every later day's pooling has to beat:
   ~3.1ms/op on a 3-node loopback cluster.
+- 2026-09-21 — Day 2 (Naive fixed-size pool) complete: `Pool` dials `size`
+  connections to one address up front and hands them out via a
+  channel-backed free list; `PooledClient` is the same retry/dedup logic
+  `NaiveClient` uses, now factored into a shared `client` type plus a
+  one-method `caller` interface (`dialPerCallCaller` vs `pooledCaller`) so
+  it isn't duplicated a second time. The benchmark comparison split cleanly
+  by operation: `PutAppend` barely improved (~3.1ms either way — a write's
+  latency floor is Raft's own replication round trip, not connection
+  setup), `Get` improved ~2-3x (~150-220μs down to ~50-80μs — no Raft round
+  trip underneath a read, so the client's own connection cost is nearly the
+  whole story). Also found (via -race, sharing one `PooledClient` across
+  goroutines) and documented that `PooledClient` carries the exact same
+  "not safe for concurrent use" contract `Clerk` already does. Along the
+  way, stress-running the suite surfaced and fixed a real gap in Day 8's
+  `TestFullIntegrationSurvivesWholeClusterRestart` (02-kv-store): it waited
+  for `CommitIndex` to catch up post-restart but not the further lag
+  through `applyPending`/`KVServer.applyLoop` before `Get` actually
+  reflects it — fixed by polling the real observable outcome instead.
