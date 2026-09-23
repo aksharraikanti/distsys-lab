@@ -282,3 +282,11 @@ _(continue per day)_
 ## Status
 
 See [TASKS.md](TASKS.md) for the day-by-day checklist and [../PROGRESS.md](../PROGRESS.md) for where things stand right now.
+
+### Later addendum — the client became safe for concurrent use
+Day 2 documented `PooledClient` as not safe for concurrent use, mirroring
+`Clerk`. Stage 4 Day 1 reversed that: a cache in front of a client is one
+shared client with many callers. Reads run concurrently; writes are
+serialized per client because dedup keeps only the highest SeqNum per
+ClientID — concurrent writes could commit out of order and lose the lower
+one. See Stage 4's README for the reasoning.

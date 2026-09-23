@@ -13,7 +13,7 @@ failure). Scope for the whole stage: ONE cache instance in a single process —
 keeping several cache instances coherent with each other is a different
 problem (Stage 9's edge invalidation), not this one.
 
-- [ ] **Day 1 — Cache-aside read path.** A `Store` interface
+- [x] **Day 1 — Cache-aside read path.** A `Store` interface
       (`Get`/`Put`/`Append`) that `PooledClient` already satisfies, and a
       `Cache` wrapping any `Store`: on `Get`, look in a local map; on a miss,
       read from the backing store and remember the answer. Unbounded, no
@@ -21,6 +21,11 @@ problem (Stage 9's edge invalidation), not this one.
       is still a cache. Hit/miss counters, and a benchmark of a hit vs a miss
       against a real pooled cluster: a concrete number for what a cache hit
       saves, following Stage 3 Day 2's "measure, don't assume" habit.
+      Measured (3-node loopback, Apple M2 Pro): uncached pooled `Get`
+      ~36-43µs, cache miss ~36µs (no measurable overhead), cache hit
+      ~16-22ns — about 2000x. Sharing one client across a cache's callers
+      forced a Stage 3 change: `client` is now safe for concurrent use
+      (reads concurrent, writes serialized — dedup requires it).
 - [ ] **Day 2 — Bounded capacity and LRU eviction.** An unbounded cache is a
       memory leak with good intentions. Cap the entry count and evict the
       least-recently-used entry when full (map + doubly linked list, O(1) for

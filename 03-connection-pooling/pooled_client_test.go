@@ -267,6 +267,52 @@ func TestPooledClientHandlesMoreConcurrentCallersThanPoolSize(t *testing.T) {
 	}
 }
 
+// TestPooledClientSafeForConcurrentUse: ONE client shared by many
+// goroutines mixing reads and writes (what a cache in front of it does).
+// Under -race this is the data-race check; the assertions are the
+// lost-write check — every goroutine's Appends must all land, in order,
+// which serialized writes guarantee and unserialized SeqNums would not.
+func TestPooledClientSafeForConcurrentUse(t *testing.T) {
+	addrs, cleanup := tcpKVCluster(t, 3)
+	defer cleanup()
+	c, err := NewPooledClient(addrs, 1, 3)
+	if err != nil {
+		t.Fatalf("NewPooledClient: %v", err)
+	}
+	defer c.Close()
+
+	const goroutines, ops = 8, 15
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			key := fmt.Sprintf("key-%d", g)
+			var want string
+			for i := 0; i < ops; i++ {
+				frag := fmt.Sprintf("[%d]", i)
+				c.Append(key, frag)
+				want += frag
+				_ = c.Get(fmt.Sprintf("key-%d", (g+1)%goroutines)) // concurrent reads of others' keys
+			}
+			waitForValue := time.Now().Add(2 * time.Second)
+			for c.Get(key) != want {
+				if time.Now().After(waitForValue) {
+					errs <- fmt.Errorf("goroutine %d: final Get(%s) = %q, want %q", g, key, c.Get(key), want)
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
 // BenchmarkPooledClientPutAppend is BenchmarkNaiveClientPutAppend's
 // direct counterpart — same cluster shape, same operation, same
 // b.N-driven loop — so the two numbers are directly comparable. The

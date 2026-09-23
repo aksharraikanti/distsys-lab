@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"math/big"
 	"net/rpc"
+	"sync"
 	"time"
 
 	raft "github.com/aksharraikanti/distsys-lab/01-raft"
@@ -30,17 +31,39 @@ type caller interface {
 // actual public API, the same way neither concrete type needs to leak
 // which caller it's using.
 //
-// A single client (and so a single NaiveClient/PooledClient) is NOT
-// safe for concurrent use by multiple goroutines — seqNum and
-// lastKnown aren't synchronized against overlapping in-flight calls,
-// the exact same contract 02-kv-store's Clerk documents for the exact
-// same reason. Each concurrent caller needs its own instance.
+// A client IS safe for concurrent use (Stage 4 needed that: a cache in
+// front of it is naturally one shared client with many callers; until
+// then every caller had its own, and this documented the opposite).
+// Reads run concurrently. Writes are SERIALIZED, and that is a
+// correctness requirement, not a convenience: 02-kv-store's dedup keeps
+// only the HIGHEST SeqNum applied per ClientID, so if one client had
+// seq 4 and seq 5 in flight at once and 5 committed first, 4 would then
+// be dropped as an already-seen "duplicate" — an acknowledged write
+// silently lost. One write at a time per ClientID is what the protocol
+// assumes. (Write throughput through one client is therefore serial;
+// several clients in parallel is how to get more.)
 type client struct {
-	addrs     []string
-	caller    caller
-	clientID  int64
-	seqNum    int64
+	addrs    []string
+	caller   caller
+	clientID int64
+
+	writeMu sync.Mutex // serializes putAppend; also protects seqNum
+	seqNum  int64
+
+	mu        sync.Mutex // protects lastKnown
 	lastKnown int
+}
+
+func (c *client) startIndex() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastKnown
+}
+
+func (c *client) setLastKnown(idx int) {
+	c.mu.Lock()
+	c.lastKnown = idx
+	c.mu.Unlock()
 }
 
 // newClient returns a client that will address any of addrs, making
@@ -58,18 +81,19 @@ func newClient(addrs []string, c caller) *client {
 func (c *client) Get(key string) string {
 	args := &kvstore.GetArgs{Key: key}
 	for {
+		start := c.startIndex()
 		for i := 0; i < len(c.addrs); i++ {
-			idx := (c.lastKnown + i) % len(c.addrs)
+			idx := (start + i) % len(c.addrs)
 			var reply kvstore.GetReply
 			if err := c.caller.call(c.addrs[idx], "KVServer.Get", args, &reply); err != nil {
 				continue
 			}
 			switch reply.Err {
 			case kvstore.OK:
-				c.lastKnown = idx
+				c.setLastKnown(idx)
 				return reply.Value
 			case kvstore.ErrNoKey:
-				c.lastKnown = idx
+				c.setLastKnown(idx)
 				return ""
 			}
 			// ErrWrongLeader: try the next server.
@@ -88,17 +112,20 @@ func (c *client) Put(key, value string) { c.putAppend(key, value, "Put") }
 func (c *client) Append(key, value string) { c.putAppend(key, value, "Append") }
 
 func (c *client) putAppend(key, value, op string) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	c.seqNum++
 	args := &kvstore.PutAppendArgs{Key: key, Value: value, Op: op, ClientID: c.clientID, SeqNum: c.seqNum}
 	for {
+		start := c.startIndex()
 		for i := 0; i < len(c.addrs); i++ {
-			idx := (c.lastKnown + i) % len(c.addrs)
+			idx := (start + i) % len(c.addrs)
 			var reply kvstore.PutAppendReply
 			if err := c.caller.call(c.addrs[idx], "KVServer.PutAppend", args, &reply); err != nil {
 				continue
 			}
 			if reply.Err == kvstore.OK {
-				c.lastKnown = idx
+				c.setLastKnown(idx)
 				return
 			}
 			// ErrWrongLeader or ErrTimeout: try the next server, same args.
