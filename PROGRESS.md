@@ -1,10 +1,11 @@
 # Progress
 
-Current stage: **03-connection-pooling**
-Current day: **Day 6 — Load test through real faults** (next up)
+Current stage: **04-caching**
+Current day: **Day 1 — Cache-aside read path** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
-Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-5 complete.
+Stage 3 (Connection pooling layer) complete, all 6 days.
+Stage 4 (Caching layer) scoped into 6 days, not yet started.
 
 ## Log
 
@@ -309,3 +310,20 @@ Stage 3 (Connection pooling layer) scoped into 6 days, Days 1-5 complete.
   runs and 20/20 clean full-suite runs under `-race` (one pre-existing,
   already-documented Stage 1 flake — `TestHeartbeatsKeepLeaderStable` —
   unrelated to this day, seen once).
+- 2026-09-23 — Day 6 (Load test through real faults) complete, and with it,
+  **Stage 3 is done**. `TestPoolLoadThroughRealFaults`: six `PooledClient`s
+  (pools of 1-2, fewer than callers, so backpressure is real) hammering a
+  real-TCP 3-node cluster while a node's TCP endpoint crash/restart (every
+  connection severed), a leader cut-off, and a partition fire in rotation;
+  asserts at least three fault rounds actually ran, no connection leaked,
+  every pool recovered, and a fresh client reads everything back. Its first
+  version passed in 0.12s because the workload outran the first fault — fixed
+  and verified the test can fail (skipping eviction deadlocks it).
+  **Found and fixed a real Stage 2 bug:** ~1 run in 8, clients read a value
+  missing their last acknowledged Append (always converged later — a stale
+  read, not a lost write). Cause: a just-elected leader served reads before
+  applying a no-op from its own term; Day 5's `noopLoop` proposed the no-op
+  but `Get` never waited for it. `Get` now gates on `noopAppliedTerm` (Raft
+  §8); 1/8 -> 0/50 failures. Also fixed a Day 5 test that read the pool size
+  after the load instead of its peak during it. Stage 4 (caching) scoped
+  into 6 days (`04-caching/TASKS.md`).

@@ -70,14 +70,19 @@ Package: `pool` (import path `github.com/aksharraikanti/distsys-lab/03-connectio
       (exactly like an idle eviction would) rather than always triggering an
       immediate redial — elasticity makes "always replace" the wrong default
       once the pool can legitimately be larger than it needs to be.
-- [ ] **Day 6 — Load test through real faults.** Combine Stage 2's own
+- [x] **Day 6 — Load test through real faults.** Combine Stage 2's own
       concurrent-client and fault-injection patterns (Day 5/Day 8's tests)
       with the pool sitting in between: concurrent callers hammering the pool
       while a backing KV node crashes, restarts, or gets partitioned away.
       The invariant: no connection leak, no deadlock under backpressure, and
       the pool recovers (evicts the bad connection, serves the next caller
       correctly) once the node comes back — this stage's own version of Day
-      8's full-integration test.
+      8's full-integration test. Three faults in rotation (a node's TCP
+      endpoint crashing with every connection severed, the Raft leader cut
+      off, a majority/minority partition) against pools deliberately smaller
+      than the caller count. The test found a real Stage 2 bug — see the
+      README — fixed here: `Get` now refuses to answer until a leader has
+      applied a no-op from its own term (Raft §8).
 
 ## Done means
 

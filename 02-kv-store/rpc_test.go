@@ -67,12 +67,51 @@ func TestGetReturnsErrNoKeyForMissingKey(t *testing.T) {
 	kv := NewKVServer(rf, -1)
 	defer kv.Stop()
 
+	// A leader only answers reads once its own-term no-op has applied
+	// (see Get's doc comment) — wait for that, then the real answer.
 	var reply GetReply
-	if err := kv.Get(&GetArgs{Key: "nope"}, &reply); err != nil {
-		t.Fatalf("Get: %v", err)
-	}
+	waitFor(t, time.Second, func() bool {
+		reply = GetReply{}
+		if err := kv.Get(&GetArgs{Key: "nope"}, &reply); err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		return reply.Err != ErrWrongLeader
+	})
 	if reply.Err != ErrNoKey {
 		t.Fatalf("Get(missing key) Err = %q, want ErrNoKey", reply.Err)
+	}
+}
+
+// TestGetRefusesUntilLeaderAppliesOwnTermNoop is the regression test for
+// the gap Stage 3's load test found: a node that is Leader but has not
+// yet applied a no-op from its own term may be missing entries the
+// previous leader already committed and acknowledged, so it must not
+// serve reads. Here that state is forced directly — a leader whose
+// apply loop is deliberately never started, so its no-op can never apply.
+func TestGetRefusesUntilLeaderAppliesOwnTermNoop(t *testing.T) {
+	rf := raft.NewRaft(0, nil, raft.NewFakeTransport())
+	if err := rf.BecomeCandidate(); err != nil {
+		t.Fatalf("BecomeCandidate: %v", err)
+	}
+	if err := rf.BecomeLeader(); err != nil {
+		t.Fatalf("BecomeLeader: %v", err)
+	}
+	defer rf.StopElectionTimer()
+	// Note: no `go rf.RunApplyLoop()` — nothing ever reaches ApplyCh.
+
+	kv := NewKVServer(rf, -1)
+	defer kv.Stop()
+
+	// Long enough for noopLoop to have proposed (and, with no apply loop,
+	// definitely not applied) its no-op many times over.
+	time.Sleep(20 * raft.HeartbeatInterval)
+
+	var reply GetReply
+	if err := kv.Get(&GetArgs{Key: "x"}, &reply); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if reply.Err != ErrWrongLeader {
+		t.Fatalf("Get on a leader that has not applied its own-term no-op: Err = %q, want ErrWrongLeader", reply.Err)
 	}
 }
 

@@ -348,6 +348,16 @@ _(fill this in as you learn — one section per day, in your own words.)_
   is firing at once, which is the only way any of it will ever actually
   run in practice."
 
+### Post-completion fix — reads gated on the leader's own-term no-op
+Found by Stage 3 Day 6's load test, fixed in Stage 3's PR. Day 5's
+`noopLoop` proposed a no-op on election but `Get` never waited for it to
+apply, so a just-elected leader could serve a read missing the last write
+its predecessor had acknowledged (Raft §8: a leader must apply an entry
+from its own term before serving reads). `Get` now returns `ErrWrongLeader`
+until `noopAppliedTerm` equals the current term; clients already retry that.
+Still not fully linearizable — a silently partitioned old leader can answer
+from a stale store; that needs read-index or leases.
+
 _(continue per day)_
 
 ## Reference material
