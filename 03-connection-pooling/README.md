@@ -229,6 +229,44 @@ _(fill this in as you learn — one section per day, in your own words.)_
   introduce if the growth path ever assumed "we're already at some
   size" instead of re-checking the CURRENT count every time).
 
+### Day 6 — Load test through real faults
+- The first version of the test passed in 0.12 seconds, and that speed was
+  the tell: the first fault was scheduled after a 250ms tick, and the whole
+  workload finished before it fired. It was a load test of a cluster with
+  no faults, reporting success. Fixed by firing the first fault immediately
+  AND asserting that at least three fault rounds actually ran — a test
+  should fail when it stops testing what it claims to. I then checked it
+  could fail at all by mutating `Pool.Call` to skip eviction: the test
+  deadlocked (dead connections handed out forever), so it really does
+  exercise Day 4's machinery.
+- Simulating a *crashed* endpoint needed test-side machinery because
+  `ServeKVServer` can't do it: closing the listener leaves already-accepted
+  connections alive (Day 4's lesson, now from the server side). The test's
+  `crashableEndpoint` tracks every accepted connection so `crash()` severs
+  them all and refuses new dials, and `start()` re-listens on the same
+  address — what a client of a really-restarted process sees.
+- **The test found a real Stage 2 bug.** About one run in eight, several
+  clients simultaneously read back a value missing their last acknowledged
+  Append, always by exactly one fragment. Before touching anything I
+  re-read after each mismatch to see whether it converged: every one did,
+  so nothing was lost — a read was answered by a freshly-elected leader
+  that hadn't applied the last entry its predecessor committed. Stage 2
+  Day 5's `noopLoop` was supposed to close that window, but it only
+  *proposed* the no-op; `Get` never waited for it. The actual Raft §8 rule
+  is that a leader must apply an entry from its own term before serving
+  reads. Fixed with a `noopAppliedTerm` gate in `Get` (which then revealed
+  the `"Noop"` case in `applyLoop`'s switch had always been dead code — a
+  no-op has SeqNum 0, so the dedup guard skips it before the switch). The
+  failure rate went from ~1/8 to 0/50. Endpoint crashes are what exposed
+  it: they force clients off the leader mid-flight, which Stage 2's
+  in-process `Clerk` never did.
+- One more flaw fell out of stress-running everything together: Day 5's
+  `TestPoolLoadIdleLoadCycle` read the pool size once after the load
+  finished, but under CPU contention the 30ms idle evictor could shrink the
+  pool back before that read. It now records the peak size *during* the
+  load. Same lesson as Stage 2 Day 8 in a new place — assert on what
+  happened, not on a snapshot taken after the system has moved on.
+
 _(continue per day)_
 
 ## Reference material

@@ -156,7 +156,31 @@ func TestPoolLoadIdleLoadCycle(t *testing.T) {
 	}
 	defer p.Close()
 
-	load := func(concurrency int) {
+	// load runs concurrent calls and returns the PEAK pool size seen while
+	// it ran. Sampling during the load, rather than reading the count once
+	// afterward, matters: the idle evictor starts shrinking the pool the
+	// moment connections go idle, and under CPU contention (the whole
+	// suite runs three packages at once) the gap between "load finished"
+	// and "test reads the count" can exceed IdleTimeout — an earlier
+	// version of this test read afterward and flaked for exactly that
+	// reason.
+	load := func(concurrency int) (peak int) {
+		stopSampling := make(chan struct{})
+		sampled := make(chan int, 1)
+		go func() {
+			max := 0
+			for {
+				if c := poolCount(p); c > max {
+					max = c
+				}
+				select {
+				case <-stopSampling:
+					sampled <- max
+					return
+				case <-time.After(100 * time.Microsecond):
+				}
+			}
+		}()
 		var wg sync.WaitGroup
 		errs := make(chan error, concurrency)
 		for i := 0; i < concurrency; i++ {
@@ -171,10 +195,12 @@ func TestPoolLoadIdleLoadCycle(t *testing.T) {
 			}(i)
 		}
 		wg.Wait()
+		close(stopSampling)
 		close(errs)
 		for err := range errs {
 			t.Error(err)
 		}
+		return <-sampled
 	}
 
 	if got := poolCount(p); got != 1 {
@@ -182,10 +208,8 @@ func TestPoolLoadIdleLoadCycle(t *testing.T) {
 	}
 
 	// Load: 6 concurrent callers should grow the pool up toward MaxSize.
-	load(6)
-	afterFirstLoad := poolCount(p)
-	if afterFirstLoad <= 1 {
-		t.Fatalf("count after 6 concurrent calls = %d, want > 1 (MinSize) — the pool should have grown", afterFirstLoad)
+	if peak := load(6); peak <= 1 {
+		t.Fatalf("peak count during 6 concurrent calls = %d, want > 1 (MinSize) — the pool should have grown", peak)
 	}
 
 	// Idle: wait past idleTimeout with no traffic at all.
@@ -195,10 +219,8 @@ func TestPoolLoadIdleLoadCycle(t *testing.T) {
 
 	// Load again: the pool must grow back, not stay stuck at MinSize
 	// just because it shrank once already.
-	load(6)
-	afterSecondLoad := poolCount(p)
-	if afterSecondLoad <= 1 {
-		t.Fatalf("count after a second round of 6 concurrent calls = %d, want > 1 — the pool should have regrown after shrinking", afterSecondLoad)
+	if peak := load(6); peak <= 1 {
+		t.Fatalf("peak count during a second round of 6 concurrent calls = %d, want > 1 — the pool should have regrown after shrinking", peak)
 	}
 }
 

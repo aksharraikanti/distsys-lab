@@ -73,6 +73,15 @@ type KVServer struct {
 	// for no reason relevant to what it's actually checking.
 	maxRaftState int
 
+	// noopAppliedTerm is the term of the most recent no-op entry this
+	// node's applyLoop has applied (0 = none yet). Get refuses to answer
+	// unless it equals rf's current term: that's Raft §8's rule that a
+	// leader must have committed an entry from its OWN term before it may
+	// serve reads. Until then, entries a previous leader already
+	// committed may exist that this node hasn't applied yet, and a read
+	// would silently miss them.
+	noopAppliedTerm int
+
 	// stopCh/stopOnce shut down applyLoop and noopLoop. Day 5's own
 	// stress test is what surfaced why this needs to be real rather
 	// than deferred: a Go test binary runs every test in one process,
@@ -224,6 +233,13 @@ func (kv *KVServer) applyLoop() {
 		}
 
 		kv.mu.Lock()
+		if op.Type == "Noop" {
+			// Handled before the dedup guard, not inside it: a no-op has
+			// ClientID 0 / SeqNum 0, and 0 > duplicateTable[0] (also 0) is
+			// false, so the guard below would skip it entirely — which is
+			// exactly why the "Noop" case in its switch is unreachable.
+			kv.noopAppliedTerm = msg.Term
+		}
 		if op.SeqNum > kv.duplicateTable[op.ClientID] {
 			switch op.Type {
 			case "Put":
@@ -313,17 +329,37 @@ func (kv *KVServer) get(key string) (value string, ok bool) {
 	return value, ok
 }
 
-// Get is the client-facing RPC handler for a read. Day 5's noopLoop
-// closes the "freshly-elected leader hasn't confirmed its own older
-// entries yet" gap, but Get is still NOT fully linearizable: it checks
-// that this node currently believes itself to be Leader, and that
-// belief itself can be stale — a leader that's been silently
-// partitioned away doesn't know it's been superseded, and would happily
-// keep answering Gets from its own (now stale) local store. Closing
-// that gap for real (routing reads through the log, or a leader-lease
-// scheme) is explicitly a later day's job, not this one's.
+// Get is the client-facing RPC handler for a read. It answers only if
+// this node is Leader AND has applied a no-op from its own current term
+// (noopAppliedTerm) — Raft §8's read rule. noopLoop proposes that no-op
+// the moment a node wins an election, but proposing it isn't enough:
+// until it has actually committed and applied, entries the PREVIOUS
+// leader had already committed (and acknowledged to clients) may not be
+// in this node's store yet. Stage 3's load test found exactly that: a
+// client's Append is acknowledged by one leader, the client's next Get
+// lands on a just-elected successor, and it reads a value missing the
+// last acknowledged write. Until the no-op applies, Get reports
+// ErrWrongLeader, which every client already retries.
+//
+// Get is still NOT fully linearizable: a leader that's been silently
+// partitioned away doesn't know it's been superseded, and would keep
+// answering from its own (now stale) store. Closing THAT gap (routing
+// reads through the log, or a read-index / leader-lease scheme) remains
+// future work.
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) error {
 	if kv.rf.State() != raft.Leader {
+		reply.Err = ErrWrongLeader
+		return nil
+	}
+	// Term is read BEFORE noopAppliedTerm on purpose: if leadership
+	// changes between the two reads, the older term can only be <= the
+	// applied one, and a stale match here is caught by the State check
+	// having just passed for a node still leading that term.
+	term := kv.rf.Term()
+	kv.mu.Lock()
+	ready := kv.noopAppliedTerm == term
+	kv.mu.Unlock()
+	if !ready {
 		reply.Err = ErrWrongLeader
 		return nil
 	}
