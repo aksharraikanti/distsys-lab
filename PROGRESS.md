@@ -1,11 +1,11 @@
 # Progress
 
 Current stage: **04-caching**
-Current day: **Day 1 — Cache-aside read path** (next up)
+Current day: **Day 2 — Bounded capacity and LRU eviction** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
-Stage 4 (Caching layer) scoped into 6 days, not yet started.
+Stage 4 (Caching layer) scoped into 6 days, Day 1 complete.
 
 ## Log
 
@@ -327,3 +327,14 @@ Stage 4 (Caching layer) scoped into 6 days, not yet started.
   §8); 1/8 -> 0/50 failures. Also fixed a Day 5 test that read the pool size
   after the load instead of its peak during it. Stage 4 (caching) scoped
   into 6 days (`04-caching/TASKS.md`).
+- 2026-09-23 — Stage 4 Day 1 (Cache-aside read path) complete: `Cache` over a
+  `Store` interface that `PooledClient` satisfies as-is; unbounded, no expiry,
+  writes pass through (deliberately — `TestWriteLeavesCachedValueStale` pins
+  the resulting staleness gap until Day 4). Store is called outside the cache
+  lock so one slow miss can't block hits. Measured against a real pooled TCP
+  cluster: uncached `Get` ~36-43µs, miss ~36µs (no overhead), hit ~16-22ns
+  (~2000x). Sharing one client across a cache's callers forced a Stage 3
+  change: `client` is now safe for concurrent use — reads concurrent, writes
+  serialized, because dedup keeps only the highest SeqNum per ClientID and
+  concurrent writes could silently lose the lower one. 20/20 clean
+  full-suite runs under `-race`.
