@@ -26,11 +26,13 @@ problem (Stage 9's edge invalidation), not this one.
       ~16-22ns — about 2000x. Sharing one client across a cache's callers
       forced a Stage 3 change: `client` is now safe for concurrent use
       (reads concurrent, writes serialized — dedup requires it).
-- [ ] **Day 2 — Bounded capacity and LRU eviction.** An unbounded cache is a
+- [x] **Day 2 — Bounded capacity and LRU eviction.** An unbounded cache is a
       memory leak with good intentions. Cap the entry count and evict the
       least-recently-used entry when full (map + doubly linked list, O(1) for
       both lookup and recency update). Prove eviction order precisely, and
-      that a `Get` counts as a "use."
+      that a `Get` counts as a "use." A hit costs the same ~17-22ns as
+      before — the recency bookkeeping is free at this scale. Also fixed a
+      Stage 2 test left over from Stage 3 Day 6's `Get` gate.
 - [ ] **Day 3 — TTL expiry.** Entries go stale even when nobody writes through
       this cache (another client can change the key). Give each entry a
       deadline and treat an expired entry as a miss. Inject the clock as a

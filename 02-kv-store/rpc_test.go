@@ -41,10 +41,17 @@ func TestPutAppendAndGetRoundTrip(t *testing.T) {
 		t.Fatalf("PutAppend(Append) Err = %q, want OK", appendReply.Err)
 	}
 
+	// Get only answers once the leader's own-term no-op has applied, and
+	// noopLoop's tick can land after these writes — so wait for a real
+	// answer rather than assuming one arrives instantly.
 	var getReply GetReply
-	if err := kv.Get(&GetArgs{Key: "x"}, &getReply); err != nil {
-		t.Fatalf("Get: %v", err)
-	}
+	waitFor(t, time.Second, func() bool {
+		getReply = GetReply{}
+		if err := kv.Get(&GetArgs{Key: "x"}, &getReply); err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		return getReply.Err != ErrWrongLeader
+	})
 	if getReply.Err != OK || getReply.Value != "1-more" {
 		t.Fatalf("Get(x) = (Err=%q, Value=%q), want (OK, \"1-more\")", getReply.Err, getReply.Value)
 	}

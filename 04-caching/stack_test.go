@@ -88,7 +88,7 @@ func TestCacheOverRealPooledStack(t *testing.T) {
 	client, cleanup := pooledStack(t)
 	defer cleanup()
 
-	c := New(client)
+	c := New(client, 100)
 	c.Put("greeting", "hello")
 	c.Append("greeting", ", world")
 
@@ -124,7 +124,7 @@ func BenchmarkCacheMiss(b *testing.B) {
 	for i := range keys {
 		keys[i] = fmt.Sprintf("miss-%d", i)
 	}
-	c := New(client)
+	c := New(client, 100)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		c.Get(keys[i])
@@ -136,7 +136,7 @@ func BenchmarkCacheHit(b *testing.B) {
 	client, cleanup := pooledStack(b)
 	defer cleanup()
 	client.Put("bench-key", "x")
-	c := New(client)
+	c := New(client, 100)
 	c.Get("bench-key") // fill
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

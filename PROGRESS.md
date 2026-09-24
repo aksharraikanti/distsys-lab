@@ -1,11 +1,11 @@
 # Progress
 
 Current stage: **04-caching**
-Current day: **Day 2 — Bounded capacity and LRU eviction** (next up)
+Current day: **Day 3 — TTL expiry** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
-Stage 4 (Caching layer) scoped into 6 days, Day 1 complete.
+Stage 4 (Caching layer) scoped into 6 days, Days 1-2 complete.
 
 ## Log
 
@@ -338,3 +338,13 @@ Stage 4 (Caching layer) scoped into 6 days, Day 1 complete.
   serialized, because dedup keeps only the highest SeqNum per ClientID and
   concurrent writes could silently lose the lower one. 20/20 clean
   full-suite runs under `-race`.
+- 2026-09-24 — Stage 4 Day 2 (Bounded capacity and LRU eviction) complete:
+  `New(store, capacity)` keeps at most `capacity` entries in a map + doubly
+  linked recency list (O(1) lookup and O(1) "mark used"); a hit counts as a
+  use, the back of the list is evicted on overflow, and `Evictions` is
+  counted. Tests check eviction order step by step and the map/list
+  invariant directly; the duplicate-node test was verified by mutation
+  (removing `insertLocked`'s existing-key branch fails two tests). A hit
+  still costs ~17-22ns. Also fixed Stage 2's `TestPutAppendAndGetRoundTrip`,
+  a leftover from Stage 3 Day 6's `Get` gate that flaked once in 20 runs
+  (now 300/300).
