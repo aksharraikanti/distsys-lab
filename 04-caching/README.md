@@ -53,6 +53,46 @@ _(fill this in as you learn — one section per day, in your own words.)_
   close to free downside; the price is entirely correctness, which is the rest
   of the stage.
 
+### Day 2 — Bounded capacity and LRU eviction
+- The classic LRU is a map plus a doubly linked list, and the whole design is
+  keeping the two in agreement: the map gives O(1) lookup, the list gives
+  O(1) "move to front" and "drop the back", and the list node stores its key
+  so that evicting the back node can also delete the right map entry. The bug
+  that structure invites is a node in the list that the map no longer points
+  at — an orphan — because eviction then deletes by *key* and can remove a
+  live entry that happens to share it. So the tests check the invariant
+  directly (same size, every node is the one its key maps to) rather than
+  only checking behavior.
+- The orphan isn't hypothetical here. Day 1 left concurrent misses on the same
+  key uncoalesced, so two goroutines can both miss, both fetch, and both
+  insert. Without a branch in `insertLocked` that updates the existing node,
+  the second insert pushes a duplicate. I proved the test catches that by
+  deleting the branch: two tests failed with "map has 1 entries but list has 2
+  nodes". Worth doing for any test guarding a subtle bug — a test that has
+  never failed hasn't shown it can.
+- A hit now takes the exclusive lock. Marking an entry as used mutates the
+  recency list, so an LRU can't offer readers a shared `RWMutex` fast path the
+  way a plain map could. The lock is still only held for map and list work,
+  never across a store call, and a hit still costs ~17-22ns, so this doesn't
+  matter at this scale. It would matter under heavy multi-core read
+  contention, which is the standard reason real caches shard or sample their
+  recency updates. Noted, not built.
+- Evicted-then-read-again is a normal miss, and `Evictions` is counted so the
+  Day 6 load test can report it: a hit rate is only interpretable next to how
+  much the cache is thrashing.
+- A hung test taught a small lesson about my own test double: `gatedStore`'s
+  `entered` channel had buffer 2, but later calls in the same test sent on it
+  three more times with no receiver, so the test deadlocked on a send. Sizing
+  a signalling channel for exactly the calls you're thinking about, instead of
+  all the calls that will happen, is an easy mistake.
+- Stage 2's `TestPutAppendAndGetRoundTrip` flaked once in 20 runs. That was on
+  me from Stage 3 Day 6: it calls `Get` right after `PutAppend`, but `Get` now
+  refuses until the leader's no-op applies, and the no-op's tick can land after
+  the writes. It passed all of Day 6's stress runs by timing luck. Fixed by
+  waiting for a real answer, then 300/300 clean. When you change a contract,
+  grep every caller — stress runs only find the ones the scheduler happens to
+  expose.
+
 _(continue per day)_
 
 ## Reference material

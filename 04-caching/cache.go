@@ -3,7 +3,10 @@
 // 04-caching/TASKS.md for the day-by-day build plan this file follows.
 package cache
 
-import "sync"
+import (
+	"container/list"
+	"sync"
+)
 
 // Store is what a Cache sits in front of: the three operations every KV
 // client in this repo already has. 03-connection-pooling's PooledClient
@@ -19,17 +22,22 @@ type Store interface {
 
 // Stats is a snapshot of a Cache's counters.
 type Stats struct {
-	Hits   int64
-	Misses int64
+	Hits      int64
+	Misses    int64
+	Evictions int64
 }
 
-// Cache is a cache-aside read cache: Get answers from a local map when it
+// Cache is a cache-aside read cache: Get answers from local memory when it
 // can and otherwise reads the backing Store and remembers the answer. The
-// APPLICATION-visible policy is cache-aside — the cache is populated lazily
-// by reads, never pre-loaded.
+// cache is populated lazily by reads, never pre-loaded.
 //
-// Day 1 is deliberately the simplest thing that is still a cache:
-//   - Unbounded (Day 2 adds capacity and LRU eviction).
+// It holds at most capacity entries (Day 2). When a new entry would exceed
+// that, the least-recently-used entry is evicted: entries are kept in a
+// doubly linked list ordered by recency, with a map from key to list node so
+// both lookup and "mark as just used" are O(1). A Get that hits counts as a
+// use — a hot key must not be evicted just because it was written long ago.
+//
+// Still deliberately unfinished:
 //   - No expiry (Day 3 adds TTLs).
 //   - Writes pass straight through to the Store and DO NOT touch the cache,
 //     so a cached key goes stale the moment it is written through this same
@@ -38,18 +46,40 @@ type Stats struct {
 //   - Concurrent misses on one key each hit the Store independently
 //     (Day 5 coalesces them).
 //
-// A Cache is safe for concurrent use.
+// A Cache is safe for concurrent use. Note that a hit now takes the cache's
+// exclusive lock, because marking an entry used mutates the recency list — a
+// read-only fast path (RWMutex) is not available to an LRU. That lock is held
+// only for map and list operations, never across a Store call.
 type Cache struct {
-	store Store
+	store    Store
+	capacity int
 
 	mu      sync.Mutex
-	entries map[string]string
+	entries map[string]*list.Element // key -> node in order
+	order   *list.List               // front = most recently used
 	stats   Stats
 }
 
-// New returns an empty Cache in front of store.
-func New(store Store) *Cache {
-	return &Cache{store: store, entries: make(map[string]string)}
+// entry is what each list node holds. The key is stored alongside the value
+// so that evicting the back node can also delete it from the map.
+type entry struct {
+	key   string
+	value string
+}
+
+// New returns an empty Cache holding at most capacity entries in front of
+// store. capacity must be at least 1: a zero-capacity cache would silently be
+// a pass-through, and that is a bug in the caller, not a configuration.
+func New(store Store, capacity int) *Cache {
+	if capacity < 1 {
+		panic("cache: capacity must be at least 1")
+	}
+	return &Cache{
+		store:    store,
+		capacity: capacity,
+		entries:  make(map[string]*list.Element, capacity),
+		order:    list.New(),
+	}
 }
 
 // Get returns the value for key, from the cache if present.
@@ -62,12 +92,14 @@ func New(store Store) *Cache {
 // An absent key reads as "" (the Store's own convention) and that answer is
 // cached like any other, so repeated reads of a missing key don't each pay a
 // round trip either. The flip side is the same staleness as everything else
-// on Day 1: if the key is created later, the cached "" is served until
-// something evicts it.
+// here: if the key is created later, the cached "" is served until something
+// evicts it.
 func (c *Cache) Get(key string) string {
 	c.mu.Lock()
-	if v, ok := c.entries[key]; ok {
+	if el, ok := c.entries[key]; ok {
+		c.order.MoveToFront(el)
 		c.stats.Hits++
+		v := el.Value.(*entry).value
 		c.mu.Unlock()
 		return v
 	}
@@ -77,19 +109,48 @@ func (c *Cache) Get(key string) string {
 	v := c.store.Get(key)
 
 	c.mu.Lock()
-	c.entries[key] = v
+	c.insertLocked(key, v)
 	c.mu.Unlock()
 	return v
 }
 
+// insertLocked records key=value as the most recently used entry, evicting
+// from the back if that pushes the cache over capacity. The key may already
+// be present: two goroutines can miss on the same key at once (Day 5 will
+// coalesce that), and the second to finish must update the existing node,
+// not add a duplicate — a duplicate would leave an unreachable list node
+// that later eviction would try to delete from the map by key, removing the
+// live entry instead.
+func (c *Cache) insertLocked(key, value string) {
+	if el, ok := c.entries[key]; ok {
+		el.Value.(*entry).value = value
+		c.order.MoveToFront(el)
+		return
+	}
+	c.entries[key] = c.order.PushFront(&entry{key: key, value: value})
+	if c.order.Len() > c.capacity {
+		oldest := c.order.Back()
+		c.order.Remove(oldest)
+		delete(c.entries, oldest.Value.(*entry).key)
+		c.stats.Evictions++
+	}
+}
+
 // Put writes through to the Store. It does not update or invalidate the
-// cache on Day 1 — see the Cache doc comment.
+// cache yet — see the Cache doc comment.
 func (c *Cache) Put(key, value string) { c.store.Put(key, value) }
 
 // Append writes through to the Store; see Put.
 func (c *Cache) Append(key, value string) { c.store.Append(key, value) }
 
-// Stats returns a snapshot of the hit/miss counters.
+// Len returns how many entries the cache currently holds.
+func (c *Cache) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.order.Len()
+}
+
+// Stats returns a snapshot of the counters.
 func (c *Cache) Stats() Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
