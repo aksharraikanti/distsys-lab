@@ -33,12 +33,15 @@ problem (Stage 9's edge invalidation), not this one.
       that a `Get` counts as a "use." A hit costs the same ~17-22ns as
       before — the recency bookkeeping is free at this scale. Also fixed a
       Stage 2 test left over from Stage 3 Day 6's `Get` gate.
-- [ ] **Day 3 — TTL expiry.** Entries go stale even when nobody writes through
+- [x] **Day 3 — TTL expiry.** Entries go stale even when nobody writes through
       this cache (another client can change the key). Give each entry a
       deadline and treat an expired entry as a miss. Inject the clock as a
       dependency so expiry is tested deterministically instead of with real
       sleeps — this project's flaky-timing history (Stage 1's election
-      margins, Stage 2 Day 5's goroutine leak) is exactly why.
+      margins, Stage 2 Day 5's goroutine leak) is exactly why. `New` took
+      a third argument here, so it became `New(store, Options{...})` —
+      Stage 3 Day 5's `NewPool` lesson applied before the footgun, not
+      after. TTL checking costs ~32ns per hit (a clock read): ~16ns -> ~48ns.
 - [ ] **Day 4 — Write policies.** What should a `Put`/`Append` do to the cache?
       Implement and compare two: write-invalidate (drop the cached entry, let
       the next read refill it) and write-through (update the cache with the

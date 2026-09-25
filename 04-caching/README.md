@@ -93,6 +93,48 @@ _(fill this in as you learn — one section per day, in your own words.)_
   grep every caller — stress runs only find the ones the scheduler happens to
   expose.
 
+### Day 3 — TTL expiry
+- Why a TTL at all, when Day 4 will make this cache's own writes update or
+  invalidate it? Because a cache can only fix staleness it *causes*. Any
+  other client can change a key without ever passing through this process, and
+  nothing here will ever hear about it. A TTL is the only tool that bounds how
+  long such a value can be served, and it's what turns Day 1's "stale forever"
+  gap into "stale for at most one TTL".
+- Three semantics were each a real decision, and each has a test that fails
+  if you flip it (I checked by mutating all three): the deadline counts from
+  fetch *start* (a slow fetch returned something that was only known to be
+  current sometime during it — counting from the end overstates freshness);
+  a hit does *not* extend the deadline (refresh-on-read would keep the most
+  frequently read keys, whose staleness is most visible, cached forever); and
+  at exactly the deadline the entry is already expired ("served for less than
+  d"). The third is a coin flip that matters only because it's a place two
+  implementations silently disagree.
+- Expiry is lazy: checked on read, removed on read. No background sweeper —
+  that's a goroutine with a lifecycle (Stage 3's `Close`/`WaitGroup`
+  machinery) spent to reclaim memory that `Capacity` already bounds. The cost
+  is that an expired entry nobody reads again occupies a slot until LRU evicts
+  it. It's never *served*, only *held*. Worth revisiting only if the cache
+  gets large enough that dead entries crowd out live ones.
+- The injected `Clock` is why the tests are instant and exact: advance a fake
+  clock by 59s, then 2s, and assert. Real-sleep expiry tests are how this repo
+  got flaky before (Stage 1's election margins, Stage 3's idle evictor). One
+  test does use the real clock, to prove the nil default is wired up — but
+  only in the direction that can't spuriously fail: sleeping never
+  undershoots, so "expired after 60ms" is safe to assert, while "still fresh
+  within 20ms" would flake under load.
+- `Options` instead of a third positional argument: `New(store, capacity)` was
+  about to become `New(store, capacity, ttl, clock)`. I did the refactor
+  before it was a footgun, because Stage 3 Day 5 showed what waiting costs.
+- One of my own mutation checks was bogus and I nearly took its silence as a
+  pass: the mutated `Get` left a variable unused, so the package didn't
+  compile, no test ran, and "no failures printed" looked like "not caught".
+  A mutation result only counts if the mutated code built. I redid it with
+  `_ = start` and the right test failed. Silence from a test run is not
+  evidence unless you know the test ran.
+- Cost: TTL checking is a clock read on every hit — ~32ns (a hit goes from
+  ~16ns to ~48ns). A cache with TTL 0 never reads the clock, so it pays
+  nothing for a feature it isn't using.
+
 _(continue per day)_
 
 ## Reference material
