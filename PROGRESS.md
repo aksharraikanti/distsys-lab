@@ -1,11 +1,11 @@
 # Progress
 
 Current stage: **04-caching**
-Current day: **Day 3 — TTL expiry** (next up)
+Current day: **Day 4 — Write policies** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
-Stage 4 (Caching layer) scoped into 6 days, Days 1-2 complete.
+Stage 4 (Caching layer) scoped into 6 days, Days 1-3 complete.
 
 ## Log
 
@@ -348,3 +348,14 @@ Stage 4 (Caching layer) scoped into 6 days, Days 1-2 complete.
   still costs ~17-22ns. Also fixed Stage 2's `TestPutAppendAndGetRoundTrip`,
   a leftover from Stage 3 Day 6's `Get` gate that flaked once in 20 runs
   (now 300/300).
+- 2026-09-25 — Stage 4 Day 3 (TTL expiry) complete: entries carry a deadline
+  and an expired entry is a miss (counted as `Expirations` and `Misses`, never
+  a hit). Deadline = fetch start + TTL, hits don't extend it, and the deadline
+  itself is already expired; each choice has a test, verified by mutation.
+  Expiry is lazy (no sweeper goroutine). Time comes from an injected `Clock`
+  so tests advance a fake clock instead of sleeping. `New` became
+  `New(store, Options{Capacity, TTL, Clock})` before a third positional
+  argument could become Stage 3's `NewPool` footgun. TTL costs ~32ns per hit
+  (~16ns -> ~48ns); TTL 0 never reads the clock. One mutation check was
+  invalid (it didn't compile, so nothing ran) and was redone. 20/20 clean
+  full-suite runs under `-race`.

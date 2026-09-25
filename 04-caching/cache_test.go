@@ -41,7 +41,7 @@ func (s *fakeStore) getCalls() int {
 func TestGetMissThenHit(t *testing.T) {
 	s := newFakeStore()
 	s.Put("k", "v")
-	c := New(s, 100)
+	c := New(s, Options{Capacity: 100})
 
 	if got := c.Get("k"); got != "v" {
 		t.Fatalf("first Get = %q, want v", got)
@@ -61,7 +61,7 @@ func TestGetMissThenHit(t *testing.T) {
 // read of an absent key would be a permanent miss.
 func TestMissingKeyIsCachedAsEmpty(t *testing.T) {
 	s := newFakeStore()
-	c := New(s, 100)
+	c := New(s, Options{Capacity: 100})
 	for i := 0; i < 3; i++ {
 		if got := c.Get("absent"); got != "" {
 			t.Fatalf("Get(absent) = %q, want \"\"", got)
@@ -74,7 +74,7 @@ func TestMissingKeyIsCachedAsEmpty(t *testing.T) {
 
 func TestWritesPassThroughToStore(t *testing.T) {
 	s := newFakeStore()
-	c := New(s, 100)
+	c := New(s, Options{Capacity: 100})
 	c.Put("k", "a")
 	c.Append("k", "b")
 	if got := s.data["k"]; got != "ab" {
@@ -89,7 +89,7 @@ func TestWritesPassThroughToStore(t *testing.T) {
 func TestWriteLeavesCachedValueStale(t *testing.T) {
 	s := newFakeStore()
 	s.Put("k", "old")
-	c := New(s, 100)
+	c := New(s, Options{Capacity: 100})
 	_ = c.Get("k") // cache "old"
 
 	c.Put("k", "new")
@@ -106,7 +106,7 @@ func TestConcurrentGetsAreRaceFree(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		s.Put(fmt.Sprintf("k%d", i), fmt.Sprintf("v%d", i))
 	}
-	c := New(s, 100)
+	c := New(s, Options{Capacity: 100})
 
 	var wg sync.WaitGroup
 	for g := 0; g < 16; g++ {

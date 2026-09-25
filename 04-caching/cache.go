@@ -6,6 +6,7 @@ package cache
 import (
 	"container/list"
 	"sync"
+	"time"
 )
 
 // Store is what a Cache sits in front of: the three operations every KV
@@ -25,34 +26,83 @@ type Stats struct {
 	Hits      int64
 	Misses    int64
 	Evictions int64
+	// Expirations counts entries found past their TTL when read. Each one
+	// is also counted as a Miss — an expired entry is not a hit.
+	Expirations int64
+}
+
+// Clock is the cache's source of time. It exists so tests can control it:
+// expiry tested against real sleeps is slow and flaky (this repo's history
+// with Stage 1's election timeouts and Stage 3's idle evictor is exactly
+// that), while expiry tested against a clock the test advances by hand is
+// instant and exact.
+type Clock interface {
+	Now() time.Time
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+
+// Options configures a Cache. A struct rather than positional parameters for
+// the reason Stage 3 Day 5 learned the hard way: New was about to have
+// several same-shaped arguments in a row, which the compiler can't catch if
+// two are swapped.
+type Options struct {
+	// Capacity is the most entries the cache holds (Day 2). Required, >= 1.
+	Capacity int
+
+	// TTL is how long an entry may be served after it was fetched (Day 3).
+	// Zero means entries never expire. It is measured from when the fetch
+	// STARTED and is not extended by hits — see Cache.
+	TTL time.Duration
+
+	// Clock supplies the time for TTL checks; nil means the real clock.
+	Clock Clock
 }
 
 // Cache is a cache-aside read cache: Get answers from local memory when it
 // can and otherwise reads the backing Store and remembers the answer. The
 // cache is populated lazily by reads, never pre-loaded.
 //
-// It holds at most capacity entries (Day 2). When a new entry would exceed
-// that, the least-recently-used entry is evicted: entries are kept in a
-// doubly linked list ordered by recency, with a map from key to list node so
-// both lookup and "mark as just used" are O(1). A Get that hits counts as a
-// use — a hot key must not be evicted just because it was written long ago.
+// It holds at most Options.Capacity entries (Day 2). When a new entry would
+// exceed that, the least-recently-used entry is evicted: entries are kept in
+// a doubly linked list ordered by recency, with a map from key to list node
+// so both lookup and "mark as just used" are O(1). A Get that hits counts as
+// a use — a hot key must not be evicted just because it was loaded long ago.
+//
+// Entries also expire (Day 3). Even a cache whose own writes were handled
+// perfectly would go stale, because other clients can change a key without
+// going through this Cache; a TTL is the only thing that bounds how long
+// such a value can be served. Three deliberate choices:
+//   - The deadline is fetch-start + TTL, not fetch-end + TTL: a slow fetch
+//     returned a value that was current at some point during the fetch, so
+//     counting from the end would overstate how fresh it is.
+//   - A hit does NOT extend the deadline. Refreshing on read would let a hot
+//     key stay cached, and stale, forever — the keys read most are exactly
+//     the ones whose staleness is most visible.
+//   - Expiry is lazy: an entry is checked when it is read, and removed then.
+//     There is no background sweeper (a goroutine with a lifecycle, for
+//     memory that Capacity already bounds). An expired entry nobody reads
+//     again just sits until LRU evicts it; it never gets served.
 //
 // Still deliberately unfinished:
-//   - No expiry (Day 3 adds TTLs).
 //   - Writes pass straight through to the Store and DO NOT touch the cache,
 //     so a cached key goes stale the moment it is written through this same
-//     Cache (Day 4 decides what writes should do to it). See
-//     TestWriteLeavesCachedValueStale, which pins that gap down.
+//     Cache — now for at most one TTL rather than forever. Day 4 decides what
+//     writes should do. See TestWriteLeavesCachedValueStale.
 //   - Concurrent misses on one key each hit the Store independently
 //     (Day 5 coalesces them).
 //
-// A Cache is safe for concurrent use. Note that a hit now takes the cache's
+// A Cache is safe for concurrent use. Note that a hit takes the cache's
 // exclusive lock, because marking an entry used mutates the recency list — a
 // read-only fast path (RWMutex) is not available to an LRU. That lock is held
 // only for map and list operations, never across a Store call.
 type Cache struct {
 	store    Store
 	capacity int
+	ttl      time.Duration
+	clock    Clock
 
 	mu      sync.Mutex
 	entries map[string]*list.Element // key -> node in order
@@ -63,21 +113,32 @@ type Cache struct {
 // entry is what each list node holds. The key is stored alongside the value
 // so that evicting the back node can also delete it from the map.
 type entry struct {
-	key   string
-	value string
+	key     string
+	value   string
+	expires time.Time // zero = never expires
 }
 
-// New returns an empty Cache holding at most capacity entries in front of
-// store. capacity must be at least 1: a zero-capacity cache would silently be
-// a pass-through, and that is a bug in the caller, not a configuration.
-func New(store Store, capacity int) *Cache {
-	if capacity < 1 {
-		panic("cache: capacity must be at least 1")
+// New returns an empty Cache in front of store. It panics on invalid
+// options — a zero-capacity cache would silently be a pass-through and a
+// negative TTL would silently make everything expired; both are bugs in the
+// caller, not configuration.
+func New(store Store, opts Options) *Cache {
+	if opts.Capacity < 1 {
+		panic("cache: Options.Capacity must be at least 1")
+	}
+	if opts.TTL < 0 {
+		panic("cache: Options.TTL must not be negative")
+	}
+	clock := opts.Clock
+	if clock == nil {
+		clock = realClock{}
 	}
 	return &Cache{
 		store:    store,
-		capacity: capacity,
-		entries:  make(map[string]*list.Element, capacity),
+		capacity: opts.Capacity,
+		ttl:      opts.TTL,
+		clock:    clock,
+		entries:  make(map[string]*list.Element, opts.Capacity),
 		order:    list.New(),
 	}
 }
@@ -97,21 +158,47 @@ func New(store Store, capacity int) *Cache {
 func (c *Cache) Get(key string) string {
 	c.mu.Lock()
 	if el, ok := c.entries[key]; ok {
-		c.order.MoveToFront(el)
-		c.stats.Hits++
-		v := el.Value.(*entry).value
-		c.mu.Unlock()
-		return v
+		e := el.Value.(*entry)
+		if !c.expiredLocked(e) {
+			c.order.MoveToFront(el)
+			c.stats.Hits++
+			v := e.value
+			c.mu.Unlock()
+			return v
+		}
+		// Expired: drop it and fall through to an ordinary miss.
+		c.order.Remove(el)
+		delete(c.entries, key)
+		c.stats.Expirations++
 	}
 	c.stats.Misses++
+	start := c.nowLocked()
 	c.mu.Unlock()
 
 	v := c.store.Get(key)
 
 	c.mu.Lock()
-	c.insertLocked(key, v)
+	c.insertLocked(key, v, start)
 	c.mu.Unlock()
 	return v
+}
+
+// nowLocked reads the clock only when a TTL is configured, so a cache
+// without expiry pays nothing for the feature.
+func (c *Cache) nowLocked() time.Time {
+	if c.ttl == 0 {
+		return time.Time{}
+	}
+	return c.clock.Now()
+}
+
+// expiredLocked reports whether e is at or past its deadline. At exactly the
+// deadline the entry is expired: a TTL of d means "served for less than d".
+func (c *Cache) expiredLocked(e *entry) bool {
+	if c.ttl == 0 {
+		return false
+	}
+	return !c.clock.Now().Before(e.expires)
 }
 
 // insertLocked records key=value as the most recently used entry, evicting
@@ -121,13 +208,19 @@ func (c *Cache) Get(key string) string {
 // not add a duplicate — a duplicate would leave an unreachable list node
 // that later eviction would try to delete from the map by key, removing the
 // live entry instead.
-func (c *Cache) insertLocked(key, value string) {
+func (c *Cache) insertLocked(key, value string, fetchStart time.Time) {
+	var expires time.Time
+	if c.ttl > 0 {
+		expires = fetchStart.Add(c.ttl)
+	}
 	if el, ok := c.entries[key]; ok {
-		el.Value.(*entry).value = value
+		e := el.Value.(*entry)
+		e.value = value
+		e.expires = expires
 		c.order.MoveToFront(el)
 		return
 	}
-	c.entries[key] = c.order.PushFront(&entry{key: key, value: value})
+	c.entries[key] = c.order.PushFront(&entry{key: key, value: value, expires: expires})
 	if c.order.Len() > c.capacity {
 		oldest := c.order.Back()
 		c.order.Remove(oldest)

@@ -41,7 +41,7 @@ func (c *Cache) checkInvariants(t *testing.T) {
 
 func TestEvictsLeastRecentlyUsed(t *testing.T) {
 	s := newFakeStore()
-	c := New(s, 3)
+	c := New(s, Options{Capacity: 3})
 	for _, k := range []string{"a", "b", "c", "d"} { // d pushes out a
 		c.Get(k)
 	}
@@ -68,7 +68,7 @@ func TestEvictsLeastRecentlyUsed(t *testing.T) {
 // A hit must count as a use, or eviction order would be plain FIFO and a hot
 // key would be thrown out just for having been loaded early.
 func TestGetCountsAsUse(t *testing.T) {
-	c := New(newFakeStore(), 2)
+	c := New(newFakeStore(), Options{Capacity: 2})
 	c.Get("a")
 	c.Get("b")
 	c.Get("a") // touch a: b is now the least recently used
@@ -79,7 +79,7 @@ func TestGetCountsAsUse(t *testing.T) {
 }
 
 func TestEvictionOrderOverLongerSequence(t *testing.T) {
-	c := New(newFakeStore(), 3)
+	c := New(newFakeStore(), Options{Capacity: 3})
 	steps := []struct {
 		get  string
 		want []string // MRU first, after this Get
@@ -104,7 +104,7 @@ func TestEvictionOrderOverLongerSequence(t *testing.T) {
 
 func TestNeverExceedsCapacityUnderConcurrency(t *testing.T) {
 	const capacity = 8
-	c := New(newFakeStore(), capacity)
+	c := New(newFakeStore(), Options{Capacity: capacity})
 	var wg sync.WaitGroup
 	for g := 0; g < 12; g++ {
 		wg.Add(1)
@@ -142,7 +142,7 @@ func (g *gatedStore) Get(key string) string {
 func TestConcurrentMissesOnOneKeyDoNotDuplicateEntry(t *testing.T) {
 	g := &gatedStore{fakeStore: newFakeStore(), entered: make(chan struct{}, 16), release: make(chan struct{})}
 	g.fakeStore.data["k"] = "v"
-	c := New(g, 2)
+	c := New(g, Options{Capacity: 2})
 
 	var wg sync.WaitGroup
 	for i := 0; i < 2; i++ {
@@ -169,8 +169,8 @@ func TestConcurrentMissesOnOneKeyDoNotDuplicateEntry(t *testing.T) {
 func TestNewRejectsNonPositiveCapacity(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Fatal("New(store, 0) did not panic")
+			t.Fatal("New(store, Options{Capacity: 0}) did not panic")
 		}
 	}()
-	New(newFakeStore(), 0)
+	New(newFakeStore(), Options{Capacity: 0})
 }
