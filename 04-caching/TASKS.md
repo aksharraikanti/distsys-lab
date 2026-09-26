@@ -42,7 +42,7 @@ problem (Stage 9's edge invalidation), not this one.
       a third argument here, so it became `New(store, Options{...})` —
       Stage 3 Day 5's `NewPool` lesson applied before the footgun, not
       after. TTL checking costs ~32ns per hit (a clock read): ~16ns -> ~48ns.
-- [ ] **Day 4 — Write policies.** What should a `Put`/`Append` do to the cache?
+- [x] **Day 4 — Write policies.** What should a `Put`/`Append` do to the cache?
       Implement and compare two: write-invalidate (drop the cached entry, let
       the next read refill it) and write-through (update the cache with the
       new value). `Append` is the interesting case — the cache can't know the

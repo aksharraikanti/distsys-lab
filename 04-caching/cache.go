@@ -29,7 +29,27 @@ type Stats struct {
 	// Expirations counts entries found past their TTL when read. Each one
 	// is also counted as a Miss — an expired entry is not a hit.
 	Expirations int64
+	// Invalidations counts entries a write dropped from the cache (Day 4).
+	Invalidations int64
 }
+
+// WritePolicy is what a Put does to the cache (Day 4). Append always
+// invalidates under either policy — see Cache.Append.
+type WritePolicy int
+
+const (
+	// WriteInvalidate drops the key's entry on a write, so the next read
+	// misses and refills from the store. It is the zero value: it can never
+	// cache a wrong value, it only costs a miss.
+	WriteInvalidate WritePolicy = iota
+
+	// WriteThrough replaces the key's entry with the value just written (and
+	// populates it if absent), so a read right after a write is a hit. The
+	// costs are that every write now displaces something in a bounded cache
+	// — including writes to keys nobody ever reads — and that it can only be
+	// as right as the write itself.
+	WriteThrough
+)
 
 // Clock is the cache's source of time. It exists so tests can control it:
 // expiry tested against real sleeps is slow and flaky (this repo's history
@@ -59,6 +79,10 @@ type Options struct {
 
 	// Clock supplies the time for TTL checks; nil means the real clock.
 	Clock Clock
+
+	// WritePolicy is what Put does to the cache (Day 4). The zero value is
+	// WriteInvalidate.
+	WritePolicy WritePolicy
 }
 
 // Cache is a cache-aside read cache: Get answers from local memory when it
@@ -86,13 +110,17 @@ type Options struct {
 //     memory that Capacity already bounds). An expired entry nobody reads
 //     again just sits until LRU evicts it; it never gets served.
 //
-// Still deliberately unfinished:
-//   - Writes pass straight through to the Store and DO NOT touch the cache,
-//     so a cached key goes stale the moment it is written through this same
-//     Cache — now for at most one TTL rather than forever. Day 4 decides what
-//     writes should do. See TestWriteLeavesCachedValueStale.
-//   - Concurrent misses on one key each hit the Store independently
-//     (Day 5 coalesces them).
+// Writes (Day 4) go to the Store FIRST and only then touch the cache, per
+// Options.WritePolicy, so a single goroutine always reads its own writes.
+// Store-first is deliberate: invalidating first would let a concurrent reader
+// refill the cache with the OLD value in the gap before the store write lands.
+//
+// Still deliberately unfinished (both are Day 5):
+//   - A reader that fetched the old value BEFORE a write can still insert it
+//     AFTER the write's cache update, leaving it stale for up to a TTL. Store-
+//     first ordering narrows that race but cannot close it — see
+//     TestStaleFillRaceIsAKnownGap.
+//   - Concurrent misses on one key each hit the Store independently.
 //
 // A Cache is safe for concurrent use. Note that a hit takes the cache's
 // exclusive lock, because marking an entry used mutates the recency list — a
@@ -103,6 +131,7 @@ type Cache struct {
 	capacity int
 	ttl      time.Duration
 	clock    Clock
+	policy   WritePolicy
 
 	mu      sync.Mutex
 	entries map[string]*list.Element // key -> node in order
@@ -129,6 +158,9 @@ func New(store Store, opts Options) *Cache {
 	if opts.TTL < 0 {
 		panic("cache: Options.TTL must not be negative")
 	}
+	if opts.WritePolicy != WriteInvalidate && opts.WritePolicy != WriteThrough {
+		panic("cache: unknown Options.WritePolicy")
+	}
 	clock := opts.Clock
 	if clock == nil {
 		clock = realClock{}
@@ -138,6 +170,7 @@ func New(store Store, opts Options) *Cache {
 		capacity: opts.Capacity,
 		ttl:      opts.TTL,
 		clock:    clock,
+		policy:   opts.WritePolicy,
 		entries:  make(map[string]*list.Element, opts.Capacity),
 		order:    list.New(),
 	}
@@ -172,7 +205,7 @@ func (c *Cache) Get(key string) string {
 		c.stats.Expirations++
 	}
 	c.stats.Misses++
-	start := c.nowLocked()
+	start := c.now()
 	c.mu.Unlock()
 
 	v := c.store.Get(key)
@@ -183,9 +216,9 @@ func (c *Cache) Get(key string) string {
 	return v
 }
 
-// nowLocked reads the clock only when a TTL is configured, so a cache
+// now reads the clock only when a TTL is configured, so a cache
 // without expiry pays nothing for the feature.
-func (c *Cache) nowLocked() time.Time {
+func (c *Cache) now() time.Time {
 	if c.ttl == 0 {
 		return time.Time{}
 	}
@@ -229,12 +262,51 @@ func (c *Cache) insertLocked(key, value string, fetchStart time.Time) {
 	}
 }
 
-// Put writes through to the Store. It does not update or invalidate the
-// cache yet — see the Cache doc comment.
-func (c *Cache) Put(key, value string) { c.store.Put(key, value) }
+// Put writes to the Store, then updates the cache per the WritePolicy: drop
+// the entry (WriteInvalidate) or replace it with value (WriteThrough). The
+// store write happens first — see the Cache doc comment for why.
+//
+// Under WriteThrough the entry's TTL counts from when the write STARTED, the
+// same conservative rule reads use: the store acknowledged some time after
+// that, and another client may have written since.
+func (c *Cache) Put(key, value string) {
+	start := c.now()
+	c.store.Put(key, value)
 
-// Append writes through to the Store; see Put.
-func (c *Cache) Append(key, value string) { c.store.Append(key, value) }
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.policy == WriteThrough {
+		c.insertLocked(key, value, start)
+		return
+	}
+	c.invalidateLocked(key)
+}
+
+// Append writes to the Store, then drops the key's cache entry — under BOTH
+// policies. The resulting value is old+value, but the cache cannot safely
+// compute that: its copy may be stale (TTL, or another client's write), and
+// appending to a stale value caches something that never existed in the
+// store. Reading the result back would make it correct, but it costs a round
+// trip on every Append to prefetch a value that may never be read — exactly
+// the cost write-through exists to avoid. So Append invalidates, and the next
+// read pays one honest miss.
+func (c *Cache) Append(key, value string) {
+	c.store.Append(key, value)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.invalidateLocked(key)
+}
+
+// invalidateLocked drops key's entry if present, counting it only when there
+// was actually something to drop.
+func (c *Cache) invalidateLocked(key string) {
+	if el, ok := c.entries[key]; ok {
+		c.order.Remove(el)
+		delete(c.entries, key)
+		c.stats.Invalidations++
+	}
+}
 
 // Len returns how many entries the cache currently holds.
 func (c *Cache) Len() int {

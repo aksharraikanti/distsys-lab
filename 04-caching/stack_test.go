@@ -158,3 +158,29 @@ func BenchmarkCacheHitWithTTL(b *testing.B) {
 		c.Get("bench-key")
 	}
 }
+
+// TestReadYourWritesOverRealPooledStack: Day 4's guarantee through the real
+// thing — Raft cluster, TCP, connection pool — under both policies. Every
+// read follows its own goroutine's write, so it must see it.
+func TestReadYourWritesOverRealPooledStack(t *testing.T) {
+	for _, p := range policies {
+		t.Run(p.name, func(t *testing.T) {
+			client, cleanup := pooledStack(t)
+			defer cleanup()
+			c := New(client, Options{Capacity: 50, WritePolicy: p.policy})
+
+			for i := 0; i < 20; i++ {
+				key := fmt.Sprintf("key-%d", i%5) // revisit keys so cached entries get overwritten
+				want := fmt.Sprintf("v%d", i)
+				c.Put(key, want)
+				if got := c.Get(key); got != want {
+					t.Fatalf("iteration %d: Get(%s) after Put = %q, want %q", i, key, got, want)
+				}
+				c.Append(key, "!")
+				if got := c.Get(key); got != want+"!" {
+					t.Fatalf("iteration %d: Get(%s) after Append = %q, want %q", i, key, got, want+"!")
+				}
+			}
+		})
+	}
+}

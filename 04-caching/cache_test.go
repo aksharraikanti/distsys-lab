@@ -82,25 +82,6 @@ func TestWritesPassThroughToStore(t *testing.T) {
 	}
 }
 
-// TestWriteLeavesCachedValueStale documents Day 1's KNOWN gap rather than
-// hiding it: writes bypass the cache, so a cached key reads stale after a
-// write through this very Cache. Day 4 decides what writes should do (and
-// this test is then rewritten to assert read-your-writes instead).
-func TestWriteLeavesCachedValueStale(t *testing.T) {
-	s := newFakeStore()
-	s.Put("k", "old")
-	c := New(s, Options{Capacity: 100})
-	_ = c.Get("k") // cache "old"
-
-	c.Put("k", "new")
-	if got := c.Get("k"); got != "old" {
-		t.Fatalf("Get after write = %q; Day 1's cache is expected to still serve the stale \"old\" (Day 4 fixes this)", got)
-	}
-	if got := s.data["k"]; got != "new" {
-		t.Fatalf("store holds %q, want new", got)
-	}
-}
-
 func TestConcurrentGetsAreRaceFree(t *testing.T) {
 	s := newFakeStore()
 	for i := 0; i < 20; i++ {
