@@ -49,6 +49,14 @@ problem (Stage 9's edge invalidation), not this one.
       resulting value without reading it — so decide and document what each
       policy does there. Test read-your-writes through the cache for each,
       and measure the cost difference on a write-heavy vs read-heavy mix.
+      Measured by counting store reads, not timing (a real write costs ~3ms of
+      Raft replication either way, which would drown the difference): 200
+      write-then-read pairs cost WriteInvalidate 200 store reads and
+      WriteThrough 0; but write-mostly traffic to never-read keys plus a hot
+      read set cost WriteInvalidate 0 and WriteThrough 287, because
+      write-through inserts every written key and evicts the hot ones.
+      `Append` invalidates under both policies. The reader-fetches-old-value
+      race is pinned by a known-gap test and left for Day 5.
 - [ ] **Day 5 — Invalidation races and stampedes.** Two concurrency bugs every
       cache has to face. (1) Stampede: many goroutines miss on the same hot
       key at once and all hit the backing store; coalesce them into one

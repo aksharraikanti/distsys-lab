@@ -135,6 +135,57 @@ _(fill this in as you learn — one section per day, in your own words.)_
   ~16ns to ~48ns). A cache with TTL 0 never reads the clock, so it pays
   nothing for a feature it isn't using.
 
+### Day 4 — Write policies
+- `Append` decided the design. A cache can hold the result of a `Put` (you
+  just wrote it) but not of an `Append` (the result is old+value, and you
+  don't know old). The tempting shortcut is `cached + value`, and it's wrong in
+  a way no single-client test would notice: if another client appended in the
+  meantime, or the entry is merely stale, you cache a value that never existed
+  in the store — and then serve it as truth.
+  `TestAppendDoesNotBuildOnAStaleCachedValue` builds exactly that scenario. The
+  alternative, reading the result back, is correct but pays a round trip per
+  Append to prefetch something that may never be read — the very cost
+  write-through is meant to avoid. So `Append` invalidates under both
+  policies, and the next read pays one honest miss.
+- The two policies really are a tradeoff, not a ranking, and counting store
+  reads makes that concrete. When written keys are read back, write-through
+  wins outright (0 store reads vs 200 for 200 write-then-read pairs). When
+  writes go to keys nobody reads, write-through *loses*: it inserts every
+  written key, and in a bounded cache those displace the hot read set (0 store
+  reads for write-invalidate vs 287 for write-through). Which one is right
+  depends on whether your writes predict your reads. Invalidate is the zero
+  value because it can never cache something wrong — it can only cost a miss.
+- I measured store reads instead of latency on purpose. A write here costs
+  ~3ms of Raft replication regardless of policy, so timing would have measured
+  Raft and made both policies look identical.
+- My first threshold for the pollution test was a guess (`>= 400`, "nearly
+  every round") and it failed at 287. I'd reasoned that each write-only key
+  evicts a hot one every round, but a miss refills the hot key and evicts a
+  write-only one, so the cache partly recovers. The measurement was right and
+  my model was wrong; I changed the assertion to what's true ("hundreds, where
+  before it was zero") instead of nudging the number until it passed.
+- Order is store-first, then cache, and there's a test for it: freeze a `Put`
+  inside the store write, read in the gap, then release. Invalidating first
+  would let a reader in that gap miss, fetch the old value, and re-cache it,
+  with nothing left to remove it after the write lands. Flipping the order in
+  `Put` fails that test under both policies — checked by mutation.
+- Store-first narrows a race but can't close it, and
+  `TestStaleFillRaceIsAKnownGap` is the honest record of that: a reader
+  fetches "old", a writer updates store and cache, the reader inserts "old"
+  over the top, and the cache disagrees with the store until TTL. Like Day 1's
+  stale-write test it asserts the wrong behavior on purpose. Day 5's version
+  guard flips it.
+- Day 1's `TestWriteLeavesCachedValueStale` is gone, replaced by
+  `TestReadYourWrites` (both policies, both write operations) and
+  `TestWriteFixesCachedAbsence` — the cached-"" case Day 1 flagged as the
+  first taste of this stage's central problem.
+- A process slip worth recording: my docs script for this day failed an
+  assertion (I'd quoted the wrong line of TASKS.md) and aborted, but the shell
+  chain continued with `;` and shipped the code without the notes. Caught it
+  from the missing PROGRESS entry and fixed it in a follow-up PR. Chaining
+  steps with `;` after a step that can fail turns "it errored" into "it
+  shipped anyway"; the fix is `set -e`, or `&&` all the way through.
+
 _(continue per day)_
 
 ## Reference material
