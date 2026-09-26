@@ -1,11 +1,11 @@
 # Progress
 
 Current stage: **04-caching**
-Current day: **Day 4 — Write policies** (next up)
+Current day: **Day 5 — Invalidation races and stampedes** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
-Stage 4 (Caching layer) scoped into 6 days, Days 1-3 complete.
+Stage 4 (Caching layer) scoped into 6 days, Days 1-4 complete.
 
 ## Log
 
@@ -359,3 +359,17 @@ Stage 4 (Caching layer) scoped into 6 days, Days 1-3 complete.
   (~16ns -> ~48ns); TTL 0 never reads the clock. One mutation check was
   invalid (it didn't compile, so nothing ran) and was redone. 20/20 clean
   full-suite runs under `-race`.
+- 2026-09-26 — Stage 4 Day 4 (Write policies) complete: `Options.WritePolicy`
+  with `WriteInvalidate` (zero value; drop the entry) and `WriteThrough`
+  (replace it). `Append` invalidates under both — the cache can't safely
+  compute old+value from a possibly-stale copy, and reading it back costs a
+  round trip per Append. Writes go to the store first, then the cache; a test
+  freezing a `Put` mid-write proves it and the reordering mutation fails it.
+  Compared by counting store reads (a real write's ~3ms of Raft would drown
+  timing): write-then-read pairs cost invalidate 200 vs through 0, while
+  write-only keys plus a hot read set cost invalidate 0 vs through 287 —
+  a real tradeoff. `TestStaleFillRaceIsAKnownGap` pins the reader-fetches-old
+  -value race that store-first ordering can't close (Day 5). Read-your-writes
+  verified through the real pooled Raft stack. 20/20 clean full-suite runs
+  under `-race`. (Docs landed in a follow-up PR after a scripting slip; the
+  code shipped in #31.)
