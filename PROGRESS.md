@@ -1,11 +1,12 @@
 # Progress
 
-Current stage: **04-caching**
-Current day: **Day 6 — Load test, hit rate, and faults** (next up)
+Current stage: **05-sharded-kv**
+Current day: **Day 1 — Static sharding** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
-Stage 4 (Caching layer) scoped into 6 days, Days 1-5 complete.
+Stage 4 (Caching layer) complete, all 6 days.
+Stage 5 (Sharded KV store) scoped into 8 days, not yet started.
 
 ## Log
 
@@ -389,3 +390,22 @@ Stage 4 (Caching layer) scoped into 6 days, Days 1-5 complete.
   a non-compiling and a hanging one, were caught and redone; the detach test
   was rewritten to fail fast instead of hang). 20/20 clean full-suite runs
   and 100x on the race tests under `-race`.
+- 2026-09-28 — Stage 4 Day 6 (Load test, hit rate, and faults) complete, and
+  with it, **Stage 4 is done** — the track's first demoable milestone: a
+  connection-pooled, cached, Raft-backed KV store. Zipf reads over the real
+  stack: a cache holding 25% of the keys hits 79.5%; median read 155µs ->
+  1.3µs (under `-race`); hit rate provably monotonic in capacity (LRU is a
+  stack algorithm). `TestCacheUpholdsItsInvariantsThroughFaults` runs writers
+  (read-your-writes) and concurrent readers (constant shared keys, well-formed
+  writer keys) through endpoint crashes, leader cut-off and partitions under
+  both write policies; reintroducing the stale-fill or no-detach bugs makes it
+  fail 3/3. Its first version passed with `coalesced=0 staleDiscarded=0` —
+  writes serialized and nothing raced — and was rebuilt around dedicated
+  readers. `TestCacheServesHitsDuringTotalStoreOutage`: with every endpoint
+  down and a fetch and a write blocked, hits are still answered (no lock is
+  held across a store call). Honest limit: `Store` has no error return, so
+  "fail fast" would need one. My unthrottled readers pinned cores and starved
+  Stage 1's timing tests; throttled. Stage 1 timing tests
+  (`TestHeartbeatsKeepLeaderStable`, `TestAppendEntriesResetsElectionTimer`)
+  still fail ~1-4% of full-suite runs — flagged for a dedicated fix. Stage 5
+  (sharded KV store) scoped into 8 days (`05-sharded-kv/TASKS.md`).

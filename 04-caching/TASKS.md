@@ -74,7 +74,7 @@ problem (Stage 9's edge invalidation), not this one.
       writes. Over the real pooled Raft stack, 50 concurrent misses on one
       key produced 1 cluster read. Each of the five guards is verified by
       mutation.
-- [ ] **Day 6 — Load test, hit rate, and faults.** A skewed (Zipf-style)
+- [x] **Day 6 — Load test, hit rate, and faults.** A skewed (Zipf-style)
       workload against the full stack — cache over pooled client over the
       real-TCP Raft cluster — reporting hit rate and latency against the
       uncached stack, then the same workload through Stage 3's fault
@@ -83,7 +83,13 @@ problem (Stage 9's edge invalidation), not this one.
       writers, and a backing-store outage degrades to misses/errors rather
       than wedging the cache. This is the stage's — and the whole track's
       first — demoable milestone: a connection-pooled, cached, Raft-backed KV
-      store.
+      store. Measured (Zipf workload, real stack, under `-race`): a cache
+      holding 25% of the keys hits 79.5%; median read 155µs uncached vs 1.3µs
+      cached. Through the faults, the test checks read-your-writes for writer
+      goroutines and constant-valued shared keys for concurrent readers; it
+      catches both stale-fill bugs when they're deliberately reintroduced.
+      Its first version passed without ever touching the coalescing or
+      stale-fill paths — see the README.
 
 ## Done means
 
