@@ -3,6 +3,7 @@ package cache
 import (
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -182,5 +183,57 @@ func TestReadYourWritesOverRealPooledStack(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// countingStore wraps a Store and counts Get calls that reach it.
+type countingStore struct {
+	Store
+	mu   sync.Mutex
+	gets int
+}
+
+func (c *countingStore) Get(key string) string {
+	c.mu.Lock()
+	c.gets++
+	c.mu.Unlock()
+	return c.Store.Get(key)
+}
+
+// TestStampedeOverRealPooledStack: fifty goroutines miss on the same key at
+// once against the real Raft/TCP/pool stack. The cluster should see a small
+// number of reads — one per "wave" of misses, since a fetch that finishes
+// before a late goroutine arrives legitimately lets it hit the cache — and
+// never anything like fifty.
+func TestStampedeOverRealPooledStack(t *testing.T) {
+	client, cleanup := pooledStack(t)
+	defer cleanup()
+	client.Put("hot", "value")
+	cs := &countingStore{Store: client}
+	c := New(cs, Options{Capacity: 10})
+
+	const callers = 50
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if got := c.Get("hot"); got != "value" {
+				t.Errorf("Get = %q, want value", got)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	cs.mu.Lock()
+	gets := cs.gets
+	cs.mu.Unlock()
+	st := c.Stats()
+	t.Logf("%d concurrent Gets of one key -> %d cluster reads (hits=%d misses=%d coalesced=%d)", callers, gets, st.Hits, st.Misses, st.Coalesced)
+	if gets >= callers/2 {
+		t.Fatalf("%d cluster reads for %d concurrent misses on one key; coalescing should have collapsed them", gets, callers)
 	}
 }

@@ -1,11 +1,11 @@
 # Progress
 
 Current stage: **04-caching**
-Current day: **Day 5 — Invalidation races and stampedes** (next up)
+Current day: **Day 6 — Load test, hit rate, and faults** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
-Stage 4 (Caching layer) scoped into 6 days, Days 1-4 complete.
+Stage 4 (Caching layer) scoped into 6 days, Days 1-5 complete.
 
 ## Log
 
@@ -373,3 +373,19 @@ Stage 4 (Caching layer) scoped into 6 days, Days 1-4 complete.
   verified through the real pooled Raft stack. 20/20 clean full-suite runs
   under `-race`. (Docs landed in a follow-up PR after a scripting slip; the
   code shipped in #31.)
+- 2026-09-27 — Stage 4 Day 5 (Invalidation races and stampedes) complete:
+  concurrent misses on a key coalesce into one Store fetch (`flight` registry;
+  followers wait, and retry if the leader panics); a write marks the key's
+  in-flight fetch stale and DETACHES it, so a racing reader's old value is
+  never cached and the writer's own next `Get` can't join it — no per-key
+  version map, no unbounded state. Found a third race while designing this:
+  concurrent `WriteThrough` writers could update the cache in the opposite
+  order from the store, so writes are now serialized (free through the KV
+  client, which already serializes per ClientID). Day 4's known-gap test is
+  flipped to `TestStaleFillIsDiscarded`. Over the real pooled Raft stack 50
+  concurrent misses on one key -> 1 cluster read. A whole-system property test
+  checks the cache never disagrees with the store after concurrent traffic.
+  Each of the five guards is verified by mutation (two invalid attempts,
+  a non-compiling and a hanging one, were caught and redone; the detach test
+  was rewritten to fail fast instead of hang). 20/20 clean full-suite runs
+  and 100x on the race tests under `-race`.

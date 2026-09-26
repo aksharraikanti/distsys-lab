@@ -31,6 +31,13 @@ type Stats struct {
 	Expirations int64
 	// Invalidations counts entries a write dropped from the cache (Day 4).
 	Invalidations int64
+	// Coalesced counts Gets that found a fetch of their key already in
+	// flight and waited for it instead of hitting the Store (Day 5). Each is
+	// also counted as a Miss.
+	Coalesced int64
+	// StaleFillsDiscarded counts fetch results thrown away instead of cached
+	// because a write to the key landed while the fetch was in flight (Day 5).
+	StaleFillsDiscarded int64
 }
 
 // WritePolicy is what a Put does to the cache (Day 4). Append always
@@ -115,12 +122,22 @@ type Options struct {
 // Store-first is deliberate: invalidating first would let a concurrent reader
 // refill the cache with the OLD value in the gap before the store write lands.
 //
-// Still deliberately unfinished (both are Day 5):
-//   - A reader that fetched the old value BEFORE a write can still insert it
-//     AFTER the write's cache update, leaving it stale for up to a TTL. Store-
-//     first ordering narrows that race but cannot close it — see
-//     TestStaleFillRaceIsAKnownGap.
-//   - Concurrent misses on one key each hit the Store independently.
+// Three concurrency problems are handled explicitly (Day 5):
+//   - Stampede: concurrent misses on one key are coalesced into a single
+//     Store fetch. Without it a hot key that expires (or is evicted) sends
+//     every waiting caller to the Store at once — the moment the Store is
+//     least able to take it.
+//   - Stale fill: a reader that fetched the old value before a write must not
+//     insert it after the write. Each miss registers an in-flight fetch; a
+//     write marks that fetch stale, so its result is returned to its own
+//     caller (whose Get overlapped the write, so old is legal) but never
+//     cached. The write also DETACHES the fetch, so a Get that starts after
+//     the write begins a fresh one rather than joining the stale one and
+//     reading its own write back as the old value.
+//   - Write reordering: two concurrent writers to one key could land in the
+//     Store in one order and update the cache in the other, leaving the cache
+//     permanently disagreeing with the store under WriteThrough. Writes are
+//     therefore serialized (writeMu). Readers never take that lock.
 //
 // A Cache is safe for concurrent use. Note that a hit takes the cache's
 // exclusive lock, because marking an entry used mutates the recency list — a
@@ -133,10 +150,26 @@ type Cache struct {
 	clock    Clock
 	policy   WritePolicy
 
-	mu      sync.Mutex
-	entries map[string]*list.Element // key -> node in order
-	order   *list.List               // front = most recently used
-	stats   Stats
+	// writeMu serializes writes so cache updates happen in the same order as
+	// Store writes. It is held across the Store call, so a slow write delays
+	// other writers — never readers. (The KV client already serializes writes
+	// per ClientID, so through it this adds no new serialization.)
+	writeMu sync.Mutex
+
+	mu       sync.Mutex
+	entries  map[string]*list.Element // key -> node in order
+	order    *list.List               // front = most recently used
+	inflight map[string]*flight       // fetches currently running, by key
+	stats    Stats
+}
+
+// flight is one in-flight Store fetch for a key, shared by every Get that
+// missed on that key while it ran.
+type flight struct {
+	done  chan struct{} // closed when the fetch finishes, successfully or not
+	value string        // valid once done is closed, if ok
+	ok    bool          // false if the fetch panicked; waiters then retry
+	stale bool          // a write landed during the fetch: do not cache value
 }
 
 // entry is what each list node holds. The key is stored alongside the value
@@ -173,6 +206,7 @@ func New(store Store, opts Options) *Cache {
 		policy:   opts.WritePolicy,
 		entries:  make(map[string]*list.Element, opts.Capacity),
 		order:    list.New(),
+		inflight: make(map[string]*flight),
 	}
 }
 
@@ -189,31 +223,85 @@ func New(store Store, opts Options) *Cache {
 // here: if the key is created later, the cached "" is served until something
 // evicts it.
 func (c *Cache) Get(key string) string {
-	c.mu.Lock()
-	if el, ok := c.entries[key]; ok {
-		e := el.Value.(*entry)
-		if !c.expiredLocked(e) {
-			c.order.MoveToFront(el)
-			c.stats.Hits++
-			v := e.value
-			c.mu.Unlock()
-			return v
+	for {
+		c.mu.Lock()
+		if el, ok := c.entries[key]; ok {
+			e := el.Value.(*entry)
+			if !c.expiredLocked(e) {
+				c.order.MoveToFront(el)
+				c.stats.Hits++
+				v := e.value
+				c.mu.Unlock()
+				return v
+			}
+			// Expired: drop it and fall through to an ordinary miss.
+			c.order.Remove(el)
+			delete(c.entries, key)
+			c.stats.Expirations++
 		}
-		// Expired: drop it and fall through to an ordinary miss.
-		c.order.Remove(el)
-		delete(c.entries, key)
-		c.stats.Expirations++
+		c.stats.Misses++
+
+		if f, ok := c.inflight[key]; ok {
+			// Someone is already fetching this key: wait for their answer
+			// instead of asking the Store again.
+			c.stats.Coalesced++
+			c.mu.Unlock()
+			<-f.done
+			if f.ok {
+				return f.value
+			}
+			continue // the leader's fetch panicked; try again, possibly as leader
+		}
+
+		f := &flight{done: make(chan struct{})}
+		c.inflight[key] = f
+		start := c.now()
+		c.mu.Unlock()
+		return c.lead(key, f, start)
 	}
-	c.stats.Misses++
-	start := c.now()
-	c.mu.Unlock()
+}
+
+// lead runs the Store fetch for a flight this goroutine registered, caches the
+// result unless a write made it stale, and wakes everyone who joined. The
+// cleanup is deferred so that waiters are released even if the Store panics —
+// they then retry rather than blocking forever.
+//
+// Registration happens (under the lock) BEFORE the Store is read. That
+// ordering is what makes the stale mark sound: any fetch that could have read
+// a value from before a write registered before that write landed, hence
+// before the write took the lock to mark it.
+func (c *Cache) lead(key string, f *flight, start time.Time) string {
+	defer func() {
+		c.mu.Lock()
+		if c.inflight[key] == f { // a write may already have detached it
+			delete(c.inflight, key)
+		}
+		c.mu.Unlock()
+		close(f.done)
+	}()
 
 	v := c.store.Get(key)
 
 	c.mu.Lock()
-	c.insertLocked(key, v, start)
+	f.value, f.ok = v, true
+	if f.stale {
+		c.stats.StaleFillsDiscarded++
+	} else {
+		c.insertLocked(key, v, start)
+	}
 	c.mu.Unlock()
 	return v
+}
+
+// markStaleLocked is called by every write after its Store write has landed.
+// A fetch in flight for key may have read the old value, so it must not be
+// cached; and it is detached so that Gets arriving after this write start a
+// fresh fetch instead of joining it and being handed the pre-write value.
+func (c *Cache) markStaleLocked(key string) {
+	if f, ok := c.inflight[key]; ok {
+		f.stale = true
+		delete(c.inflight, key)
+	}
 }
 
 // now reads the clock only when a TTL is configured, so a cache
@@ -270,11 +358,14 @@ func (c *Cache) insertLocked(key, value string, fetchStart time.Time) {
 // same conservative rule reads use: the store acknowledged some time after
 // that, and another client may have written since.
 func (c *Cache) Put(key, value string) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	start := c.now()
 	c.store.Put(key, value)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.markStaleLocked(key)
 	if c.policy == WriteThrough {
 		c.insertLocked(key, value, start)
 		return
@@ -291,10 +382,13 @@ func (c *Cache) Put(key, value string) {
 // the cost write-through exists to avoid. So Append invalidates, and the next
 // read pays one honest miss.
 func (c *Cache) Append(key, value string) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	c.store.Append(key, value)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.markStaleLocked(key)
 	c.invalidateLocked(key)
 }
 

@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 )
 
 // keysMRUFirst returns the resident keys, most recently used first.
@@ -136,33 +137,28 @@ func (g *gatedStore) Get(key string) string {
 	return g.fakeStore.Get(key)
 }
 
-// Two goroutines miss on the same key concurrently; both then insert. The
-// second insert must update the existing entry, not add a second node for the
-// same key.
-func TestConcurrentMissesOnOneKeyDoNotDuplicateEntry(t *testing.T) {
-	g := &gatedStore{fakeStore: newFakeStore(), entered: make(chan struct{}, 16), release: make(chan struct{})}
-	g.fakeStore.data["k"] = "v"
-	c := New(g, Options{Capacity: 2})
-
-	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); c.Get("k") }()
-	}
-	<-g.entered
-	<-g.entered // both are now inside the store call, both having missed
-	close(g.release)
-	wg.Wait()
+// insertLocked must UPDATE an existing key's node, never push a second node
+// for it: a duplicate leaves an orphan the map doesn't point at, and evicting
+// that orphan deletes the live entry by key. Concurrent misses used to reach
+// this branch directly; since Day 5 coalesces them it is defensive, so the
+// test now drives it white-box.
+func TestInsertOfAnExistingKeyUpdatesInPlace(t *testing.T) {
+	c := New(newFakeStore(), Options{Capacity: 2})
+	c.mu.Lock()
+	c.insertLocked("k", "v1", time.Time{})
+	c.insertLocked("k", "v2", time.Time{})
+	c.mu.Unlock()
 
 	c.checkInvariants(t)
 	if c.Len() != 1 {
-		t.Fatalf("Len = %d after two concurrent misses on one key, want 1", c.Len())
+		t.Fatalf("Len = %d after inserting one key twice, want 1", c.Len())
 	}
-	// Fill to force evictions; a duplicated node would delete the live entry
-	// by key and corrupt the invariants.
-	c.Get("x")
-	c.Get("y")
-	c.Get("z")
+	if got := c.Get("k"); got != "v2" {
+		t.Fatalf("Get = %q, want v2 (the second insert must win)", got)
+	}
+	for _, k := range []string{"x", "y", "z"} { // force evictions
+		c.Get(k)
+	}
 	c.checkInvariants(t)
 }
 
