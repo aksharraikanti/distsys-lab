@@ -241,6 +241,65 @@ _(fill this in as you learn — one section per day, in your own words.)_
   and were redone. Same lesson as Day 3: a mutation result only counts if the
   mutant built and the test ran to a verdict.
 
+### Day 6 — Load test, hit rate, and faults
+- The hit-rate-vs-capacity curve is worth reading as a shape: with Zipf-skewed
+  reads over 200 keys, a cache holding 2% of them hits 33%, 10% of them 63%,
+  25% of them 79.5%, half of them 90%, all of them 99%. Most of the benefit
+  arrives early — the first quarter of the capacity buys most of the hit rate —
+  which is exactly why a small cache in front of a big store works at all. The
+  monotonicity is asserted, not hoped for: LRU is a *stack algorithm* (a size-k
+  cache's contents are always a subset of a size-(k+1) cache's), so hit rate
+  provably cannot fall as capacity grows, and the test would catch a bug that
+  broke that.
+- Over the real Raft + TCP + pool stack the median read goes from ~155µs to
+  ~1.3µs (under `-race`, so absolute numbers are inflated, ratios aren't). The
+  test compares medians, not means: a cached median is a memory hit and an
+  uncached one is a network round trip, so the gap survives CPU noise, where a
+  comparison of means would depend on where the tail happened to fall.
+- **The first version of the fault test passed while testing almost nothing.**
+  Its stats line said `coalesced=0 staleDiscarded=0 expirations=0`. Every
+  worker was a writer, writes serialize through one client, so reads never
+  overlapped; and a capacity of 4 evicted every entry before its TTL could
+  matter. Nothing was racing anything. The fix was structural: dedicated
+  concurrent *readers* that hit the writers' own keys — exactly what races the
+  cache's fills against the writers' updates — plus a TTL and capacity that
+  actually expire entries. Now a run shows thousands of coalesced fetches and
+  ~85 discarded stale fills. Lesson, third time this stage (Stage 3's
+  0.12-second test, Day 3's bogus mutation): print what a test exercised, and
+  distrust a pass whose stats are all zeros.
+- Then the real check: could the test catch the bugs those guards prevent? I
+  reintroduced two — caching stale fills, and not detaching the stale flight —
+  and the test failed in 3 of 3 runs each, with messages like `Get(own-1) after
+  Put = "v30+", want "v31"`: a writer reading back a value it had already
+  overwritten. A third mutant (unserialized writes) is *not* caught, and that's
+  correct rather than a gap: writers own distinct keys and the client
+  serializes writes, so no two writers ever race on one key here. That bug is
+  what its deterministic Day 5 unit test is for. An integration test and a unit
+  test guard different failures; checking which is which is the point.
+- "Degrades rather than wedges" needed an honest reading. `Store` has no error
+  return — the client retries forever — so during a full outage an uncached
+  read or a write can't fail, only wait. What the cache *can* guarantee is that
+  the waiting stays contained: `TestCacheServesHitsDuringTotalStoreOutage`
+  crashes every endpoint, starts a blocked fetch and a blocked write, and
+  checks that a hundred hits are still answered immediately — no lock is held
+  across a store call, so one stuck writer or fetcher never blocks a reader.
+  Then the store returns and both blocked operations complete. The real
+  limitation is named: turning "waits forever" into "fails fast" needs an
+  error-returning `Store` and timeouts, which nothing here has.
+- The stage's milestone: a connection-pooled, cached, Raft-backed KV store —
+  four stages, each built on the last, surviving the same crash/cut-off/
+  partition faults end to end.
+- **A cost I caused.** My reader goroutines first looped with no pause, pinning
+  several cores for the whole run, and under `go test ./...` that starved
+  Stage 1's timing-sensitive tests (one failed in ~15 full-suite runs, "condition
+  not met within 1s"). That's a defect in my test, not in Stage 1, so I
+  throttled the readers by 100µs per iteration instead of widening Stage 1's
+  timeouts; the test still exercises the guards and still catches the mutant.
+  Full-suite failures across ~70 runs afterwards were all in Stage 1 tests with
+  tight timing windows (`TestHeartbeatsKeepLeaderStable`,
+  `TestAppendEntriesResetsElectionTimer`) — a real, slowly-growing fragility
+  in Stage 1 worth a dedicated fix, flagged rather than buried.
+
 _(continue per day)_
 
 ## Reference material
