@@ -163,13 +163,11 @@ func (r *readFirstStore) Get(key string) string {
 	return v
 }
 
-// TestStaleFillRaceIsAKnownGap pins down the hole store-first ordering cannot
-// close, as Day 1's stale test did for the gap this day fixed. A reader
+// TestStaleFillIsDiscarded is Day 4's known-gap test, flipped. A reader
 // fetches "old"; a writer then updates the store AND the cache; the reader
-// finally inserts its old value over the top. The cache now disagrees with
-// the store until the entry expires or is evicted. Day 5 guards fills with a
-// per-key version so this fill is discarded — and flips this test.
-func TestStaleFillRaceIsAKnownGap(t *testing.T) {
+// finally finishes. Its own Get may legitimately return "old" — that read
+// overlapped the write — but it must not leave "old" in the cache.
+func TestStaleFillIsDiscarded(t *testing.T) {
 	for _, p := range policies {
 		t.Run(p.name, func(t *testing.T) {
 			s := &readFirstStore{fakeStore: newFakeStore(), entered: make(chan struct{}, 4), release: make(chan struct{})}
@@ -180,15 +178,15 @@ func TestStaleFillRaceIsAKnownGap(t *testing.T) {
 			go func() { done <- c.Get("k") }()
 			<-s.entered // the reader has fetched "old" and is parked
 
-			c.Put("k", "new") // store = new; the cache is invalidated / set to new
-			close(s.release)  // the reader now inserts its stale "old"
+			c.Put("k", "new")
+			close(s.release)
 			<-done
 
-			if got := s.fakeStore.data["k"]; got != "new" {
-				t.Fatalf("store holds %q, want new", got)
+			if got := c.Get("k"); got != "new" {
+				t.Fatalf("Get after the racing fill = %q, want new: the stale fetch must not be cached", got)
 			}
-			if got := c.Get("k"); got != "old" {
-				t.Fatalf("Get = %q; Day 4 is expected to still serve the stale \"old\" here (Day 5 fixes it)", got)
+			if st := c.Stats(); st.StaleFillsDiscarded != 1 {
+				t.Fatalf("StaleFillsDiscarded = %d, want 1", st.StaleFillsDiscarded)
 			}
 		})
 	}

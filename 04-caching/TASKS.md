@@ -57,7 +57,7 @@ problem (Stage 9's edge invalidation), not this one.
       write-through inserts every written key and evicts the hot ones.
       `Append` invalidates under both policies. The reader-fetches-old-value
       race is pinned by a known-gap test and left for Day 5.
-- [ ] **Day 5 — Invalidation races and stampedes.** Two concurrency bugs every
+- [x] **Day 5 — Invalidation races and stampedes.** Two concurrency bugs every
       cache has to face. (1) Stampede: many goroutines miss on the same hot
       key at once and all hit the backing store; coalesce them into one
       fetch (singleflight). (2) Stale fill: a reader misses and fetches the
@@ -66,7 +66,14 @@ problem (Stage 9's edge invalidation), not this one.
       until TTL. Guard fills with a per-key version/generation so a fill
       that raced a write is discarded. Reproduce both with a fake `Store`
       whose latency the test controls, so the interleaving is forced rather
-      than hoped for.
+      than hoped for. Stale-fill is guarded without a per-key version map:
+      a write marks the key's IN-FLIGHT fetch stale and detaches it (so the
+      writer's own next `Get` can't join it). A third race turned up while
+      designing this — two concurrent `WriteThrough` writers can update the
+      cache in the opposite order from the store — fixed by serializing
+      writes. Over the real pooled Raft stack, 50 concurrent misses on one
+      key produced 1 cluster read. Each of the five guards is verified by
+      mutation.
 - [ ] **Day 6 — Load test, hit rate, and faults.** A skewed (Zipf-style)
       workload against the full stack — cache over pooled client over the
       real-TCP Raft cluster — reporting hit rate and latency against the

@@ -186,6 +186,61 @@ _(fill this in as you learn — one section per day, in your own words.)_
   steps with `;` after a step that can fail turns "it errored" into "it
   shipped anyway"; the fix is `set -e`, or `&&` all the way through.
 
+### Day 5 — Invalidation races and stampedes
+- The version-per-key fix from the task description would have worked and
+  would also have leaked: a version for every key ever written, forever. The
+  in-flight registry gives the same guarantee with state that only exists
+  while a fetch is running. A write marks that key's in-flight fetch stale;
+  when the fetch finishes it returns its value to its own caller (whose read
+  overlapped the write, so the old value is a legal answer) but doesn't cache
+  it. The soundness argument is an ordering one: a fetch registers *before*
+  it reads the store, and a write marks fetches *after* its store write has
+  landed — so any fetch that could have seen pre-write data is already
+  registered by the time the write goes looking for it.
+- Marking the flight stale wasn't enough, and this is the subtlest thing in
+  the stage. The writer's own next `Get` would find that still-running flight
+  and *join* it, being handed the pre-write value — read-your-writes broken for
+  the exact goroutine that wrote. The write has to detach the flight too, so
+  later readers start a fresh fetch. My first mutation check of this printed
+  nothing, which I nearly read as "not caught"; it was actually a *hang* (the
+  writer's Get blocked forever behind the stale fetch), which `go test` reports
+  differently from a failure. I rewrote the test to fail in seconds with a
+  message instead. A test that can only fail by timing out is a bad test.
+- The detach test only catches the bug under `WriteInvalidate`. Under
+  `WriteThrough` the `Put` populates the cache, so the writer's next `Get` is a
+  hit and never reaches the flight logic. That's inherent, not a hole, but it's
+  the kind of thing a comment should say rather than leave for the next reader
+  to rediscover.
+- The write-write reordering race wasn't on the task list. I found it by asking
+  what *else* could make a cache permanently disagree with its store, and it's
+  real: writer 1's store write lands first but its cache update is delayed;
+  writer 2 lands v2 and updates the cache to v2; writer 1 then "updates" it to
+  v1. The store says v2, the cache says v1, no TTL heals it under
+  `WriteThrough`. Serializing writes fixes it, and costs nothing here because
+  the KV client already serializes writes per ClientID (Stage 4 Day 1). Readers
+  never take the lock.
+- Coalescing needed failure handling I almost skipped: if the leader's fetch
+  panics and joiners wait on a channel nobody closes, they hang forever. The
+  cleanup is deferred and a `flight.ok` flag tells joiners the fetch failed, so
+  they retry (one becomes the new leader). It's only reachable if a `Store`
+  panics, which the KV client never does — but "can't happen with today's
+  store" is precisely how a hang ships.
+- The measurement: 50 goroutines missing on one key against the real Raft +
+  TCP + pool stack produced **1** cluster read (`hits=0 misses=50
+  coalesced=49`). The test asserts "far fewer than half" rather than exactly
+  one, because a goroutine arriving after the fetch completes legitimately hits
+  the cache.
+- A whole-system property test ties it together: after a burst of concurrent
+  reads, writes, and appends on a few keys, every entry still in the cache must
+  equal the store's value. Checked at quiescence, where any disagreement is
+  permanent because there's no TTL to heal it.
+- Verification, for the record: all five guards (stale-cached-anyway, no
+  detach, unserialized writes, coalescing off, joiners-trust-failed-leader)
+  were broken one at a time and each is caught. Two of my first attempts were
+  invalid — one didn't compile because of a shell-escaping slip, one hung —
+  and were redone. Same lesson as Day 3: a mutation result only counts if the
+  mutant built and the test ran to a verdict.
+
 _(continue per day)_
 
 ## Reference material
