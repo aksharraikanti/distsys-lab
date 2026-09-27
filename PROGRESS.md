@@ -409,3 +409,18 @@ Stage 5 (Sharded KV store) scoped into 8 days, not yet started.
   (`TestHeartbeatsKeepLeaderStable`, `TestAppendEntriesResetsElectionTimer`)
   still fail ~1-4% of full-suite runs — flagged for a dedicated fix. Stage 5
   (sharded KV store) scoped into 8 days (`05-sharded-kv/TASKS.md`).
+- 2026-09-28 — Fix (Stage 3): pool could exceed MaxSize and hang `Close()`.
+  Found because Stage 4 Day 6's fault test hung for 5 minutes once in ~15
+  runs on a `GOMAXPROCS=2` CI emulation; the goroutine dump showed the idle
+  evictor blocked sending into a full free list. Cause: the redial paths
+  checked `count < MinSize`, dialed unlocked, then incremented — so concurrent
+  redialers plus growth could push count to MaxSize+1. Fixed by reserving the
+  slot before dialing (`tryReserveRestore`). Two stress tests failed to
+  reproduce it; a deterministic test using an injectable `dial` seam did
+  (`count = 3 > MaxSize 2` on the old logic). CI-like full suite: 1/15 before,
+  0/25 after; the cache fault test alone 0/40. Also corrects my Stage 4 Day 6
+  merge: a CI check FAILED (Stage 2's `TestKVStoreConvergesAcrossCluster`, a
+  1-second timing window) and I merged anyway because my shell chain piped
+  `gh pr checks` through `tail`, discarding its exit code. Merges are now gated
+  on the check result.
+

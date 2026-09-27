@@ -290,3 +290,36 @@ shared client with many callers. Reads run concurrently; writes are
 serialized per client because dedup keeps only the highest SeqNum per
 ClientID — concurrent writes could commit out of order and lose the lower
 one. See Stage 4's README for the reasoning.
+
+### Later addendum — a redial race, found by Stage 4's fault test
+Stage 4 Day 6's fault test hung for five minutes, once in ~15 full-suite runs
+on a `GOMAXPROCS=2` emulation of a small CI box. The goroutine dump showed
+`Pool.Close()` waiting forever on the idle evictor, which was itself blocked
+sending a connection into a full free list. That is only possible if the pool
+holds more connections than the free list's capacity (`MaxSize`) — i.e. the
+documented "count never exceeds MaxSize" invariant was false.
+
+The cause was a check-then-act gap in the redial paths (Day 4's, made worse by
+Day 5's elasticity): they checked "is count below MinSize?", dialed with the
+lock released, and only then incremented. Several redialers, or a redialer plus
+on-demand growth refilling the same gap, could all pass the check, so count
+could reach MaxSize+1; the surplus connection's send into the free list then
+blocked forever. Growth had always reserved its slot *before* dialing; the
+redial paths didn't. The fix is `tryReserveRestore`, which claims the slot
+atomically under the lock first.
+
+How I got there matters as much as the fix. My first stress test (churn the
+endpoint under concurrent load) passed 30/30 on the buggy code, and so did a
+second with a bigger `MinSize`/`MaxSize` gap — so I had a confident theory and
+no reproduction, and did not ship a claim. What settled it was a *seam*: an
+injectable `dial` function let a test park a redialer mid-dial, fill the pool
+via growth, and release it — deterministically producing `count = 3 > MaxSize
+2` on the old logic (and the hang in `Close()`), and passing on the new. The
+stress test stays as a guard, but it could not have found this. A rare
+interleaving is not reproduced by running the system more; it's reproduced by
+controlling the schedule.
+
+The same fault test is what caught the Stage 2 stale-read gap in Stage 3 Day 6.
+Heavier, more concurrent tests keep finding real bugs in earlier stages, which
+is the point of building the stack in layers and testing each new layer hard.
+
