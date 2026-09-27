@@ -1,12 +1,12 @@
 # Progress
 
 Current stage: **05-sharded-kv**
-Current day: **Day 1 — Static sharding** (next up)
+Current day: **Day 2 — Configurations and rebalancing (pure logic)** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
-Stage 5 (Sharded KV store) scoped into 8 days, not yet started.
+Stage 5 (Sharded KV store) scoped into 8 days, Day 1 complete.
 
 ## Log
 
@@ -423,4 +423,19 @@ Stage 5 (Sharded KV store) scoped into 8 days, not yet started.
   1-second timing window) and I merged anyway because my shell chain piped
   `gh pr checks` through `tail`, discarding its exit code. Merges are now gated
   on the check result.
+- 2026-09-29 — Stage 5 Day 1 (Static sharding) complete: `NShards = 10`,
+  `Key2Shard` (FNV-1a; 10,000 prefixed keys within ±2% of the mean per shard),
+  `Config{Num, Shards, Groups}` with `NewStaticConfig` (deterministic,
+  round-robin, sorted by group id) and `Validate`, and `ShardedClient` — one
+  pooled client per group, safe for concurrent use. Real-cluster tests: keys
+  live only in their owning group (checked by asking each group directly);
+  with one group down, the other groups serve reads and writes normally while
+  the dead group's key blocks, then completes with pre-outage data on
+  recovery. Write throughput 270/s (1 group) -> 804/s (3 groups), 2.97x.
+  Mutation-checked (wrong shard function, first-byte hash, global lock on
+  reads, global lock on writes); the checks exposed an unbounded search in my
+  isolation test that turned a routing bug into a 2-minute hang, now bounded.
+  Extracted the crashable-endpoint cluster harness into `internal/kvtest` (its
+  third copy); the Stage 3/4 copies are not yet migrated. 30/30 clean stage
+  runs and 20/20 clean full-suite runs under `GOMAXPROCS=2 -race`.
 
