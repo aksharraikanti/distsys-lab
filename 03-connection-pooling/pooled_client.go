@@ -91,6 +91,10 @@ type Pool struct {
 
 	free chan *pooledConn // buffered at MaxSize capacity
 
+	// dial makes a fresh connection to addr. It is a field only so tests can
+	// inject a dialer that fails or blocks; it is rpc.Dial in every real use.
+	dial func() (*rpc.Client, error)
+
 	mu    sync.Mutex // protects count
 	count int        // total live connections: checked out + in free
 
@@ -127,6 +131,7 @@ func NewPool(addr string, opts PoolOptions) (*Pool, error) {
 		free:   make(chan *pooledConn, opts.MaxSize),
 		stopCh: make(chan struct{}),
 	}
+	p.dial = func() (*rpc.Client, error) { return rpc.Dial("tcp", p.addr) }
 	for i := 0; i < opts.MinSize; i++ {
 		c, err := rpc.Dial("tcp", addr)
 		if err != nil {
@@ -189,7 +194,7 @@ func (p *Pool) checkout() (*rpc.Client, error) {
 	}
 
 	if p.tryReserveGrowth() {
-		c, err := rpc.Dial("tcp", p.addr)
+		c, err := p.dial()
 		if err == nil {
 			return c, nil
 		}
@@ -245,25 +250,45 @@ func (p *Pool) releaseGrowthReservation() {
 // background goroutine keeps retrying every RedialInterval — WITHOUT
 // blocking this or any other caller — until the minimum is restored or
 // Close stops it.
+//
+// Restoring the minimum RESERVES its slot before dialing (tryReserveRestore),
+// exactly as growth does, rather than checking "is count below MinSize?",
+// dialing with the lock released, and incrementing afterward. That
+// check-then-act form let several redialers — or a redialer plus on-demand
+// growth refilling the same gap — all pass the check, so count could exceed
+// MaxSize and the surplus connection's send into the (MaxSize-capacity) free
+// list would block forever: a hung checkin or idle evictor, and a Close that
+// never returned. Found by Stage 4's fault test; see churn_test.go.
 func (p *Pool) evictAndReplace(broken *rpc.Client) {
 	broken.Close()
 	p.mu.Lock()
 	p.count--
-	belowMin := p.count < p.opts.MinSize
 	p.mu.Unlock()
-	if !belowMin {
-		return
+	if !p.tryReserveRestore() {
+		return // at or above MinSize: the pool just shrank by one
 	}
 
-	if c, err := rpc.Dial("tcp", p.addr); err == nil {
-		p.mu.Lock()
-		p.count++
-		p.mu.Unlock()
+	if c, err := p.dial(); err == nil {
 		p.checkin(c)
 		return
 	}
+	p.releaseGrowthReservation()
 	p.wg.Add(1)
 	go p.redialUntilMinRestored()
+}
+
+// tryReserveRestore atomically claims a slot for restoring the minimum:
+// count is incremented only if the pool is still below MinSize RIGHT NOW.
+// The caller must then either turn the slot into a connection (checkin) or
+// give it back (releaseGrowthReservation).
+func (p *Pool) tryReserveRestore() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.count < p.opts.MinSize && p.count < p.opts.MaxSize {
+		p.count++
+		return true
+	}
+	return false
 }
 
 func (p *Pool) redialUntilMinRestored() {
@@ -275,28 +300,21 @@ func (p *Pool) redialUntilMinRestored() {
 		case <-p.stopCh:
 			return
 		case <-ticker.C:
-			p.mu.Lock()
-			stillBelowMin := p.count < p.opts.MinSize
-			p.mu.Unlock()
-			if !stillBelowMin {
+			if !p.tryReserveRestore() {
 				// Something else (another eviction's own redial, or a
 				// concurrent checkout's growth) already restored the
 				// minimum — nothing left for this goroutine to do.
 				return
 			}
-			c, err := rpc.Dial("tcp", p.addr)
+			c, err := p.dial()
 			if err != nil {
+				p.releaseGrowthReservation()
 				continue
 			}
-			p.mu.Lock()
-			p.count++
-			p.mu.Unlock()
 			select {
 			case p.free <- &pooledConn{client: c, returnedAt: time.Now()}:
 			case <-p.stopCh:
-				p.mu.Lock()
-				p.count--
-				p.mu.Unlock()
+				p.releaseGrowthReservation()
 				c.Close()
 			}
 			return
