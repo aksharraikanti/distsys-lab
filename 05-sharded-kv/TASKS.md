@@ -20,7 +20,7 @@ Scope: single-key operations only. Multi-key atomicity across shards is
 Stage 7 (distributed transactions); this stage is about keeping ONE key
 correct while its shard moves.
 
-- [ ] **Day 1 — Static sharding.** A fixed shard count (`NShards`, e.g. 10), a
+- [x] **Day 1 — Static sharding.** A fixed shard count (`NShards`, e.g. 10), a
       `key2shard` function, several independent Stage 2 clusters as groups,
       and a `ShardedClient` that routes each key to the group owning its
       shard under a config supplied at construction — no controller, no
@@ -30,6 +30,10 @@ correct while its shard moves.
       vs 3 groups: sharding's whole promise is that writes scale, and it's
       worth measuring whether they do (Raft replication latency per group is
       the floor — throughput should scale, latency shouldn't drop).
+      Measured: 1 group 270 writes/s, 3 groups 804 writes/s (2.97x; ideal 3x).
+      Building the fault-injectable multi-cluster test setup made this the
+      third copy of Stage 3/4's `crashableEndpoint`, so it was extracted into
+      `internal/kvtest` (the older two copies are not yet migrated onto it).
 - [ ] **Day 2 — Configurations and rebalancing (pure logic).** The `Config`
       type (`Num`, `Shards [NShards]int` group ids, `Groups map[int][]string`)
       and `Join`/`Leave`/`Move` as PURE functions from config to config. The
