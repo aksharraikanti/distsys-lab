@@ -69,7 +69,7 @@ correct while its shard moves.
       Raft §8 no-op gate broke nothing in the existing suite, so a dedicated
       whitebox test (built by hand, bypassing `noopLoop`'s ticker) was added
       to actually exercise the window it's supposed to close.
-- [ ] **Day 4 — Groups serve only their shards.** Each group polls the
+- [x] **Day 4 — Groups serve only their shards.** Each group polls the
       controller for the current config and serves a key only if its shard is
       assigned to it, otherwise `ErrWrongGroup` (the client refetches the
       config and retries). Ownership must be checked through the group's Raft
@@ -77,6 +77,25 @@ correct while its shard moves.
       belief lingers — the same hazard as Stage 2's stale-leader `Get` gap,
       except here it can hand out a shard's data after the shard has moved.
       Decide how reads handle it (read through the log, or a lease).
+      Built `GroupServer`, a new type (like `Ctrler`, not a KVServer
+      subclass): a leader polls the controller for exactly `cfg.Num+1`
+      (never the absolute latest — configs must be adopted one at a time,
+      for Day 5's sake) and Proposes it as a `Config` log entry; every
+      Put/Append is checked against `cfg` at the moment IT applies, not
+      whenever it was proposed or pre-checked — that's what "through the
+      log" means concretely. Chose "read through the log" over a lease:
+      `Get` reuses the exact Raft §8 no-op gate `Ctrler.Query`/`KVServer.Get`
+      already use. Mutation testing found TWO real gaps invisible to the
+      first test pass: `PutAppend`'s own pre-check (a fast-path rejection)
+      masked the apply-time check in every test that used it, so a
+      dedicated test proposes a Config directly ahead of a Put to force the
+      exact race the pre-check can't close; and `Config.Num == cfg.Num+1`
+      (not just `>`) was unverified since the poll loop's own discipline
+      never triggers the difference — a version-skip test now pins it,
+      since Day 5's migration needs every transition, not just the final
+      state. The known partition gap Stage 2's `Get` already carries (a
+      silently-partitioned leader keeps answering from its own stale view)
+      applies here too, unresolved, same as there.
 - [ ] **Day 5 — Shard migration.** When a group's config changes, the new owner
       PULLS the shards it gained from their previous owner, and the dedup
       table moves WITH the shard (otherwise a client retry that spans a

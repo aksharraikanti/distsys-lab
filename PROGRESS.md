@@ -1,12 +1,12 @@
 # Progress
 
 Current stage: **05-sharded-kv**
-Current day: **Day 4 — Groups serve only their shards** (next up)
+Current day: **Day 5 — Shard migration** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
-Stage 5 (Sharded KV store) scoped into 8 days, Days 1-3 complete.
+Stage 5 (Sharded KV store) scoped into 8 days, Days 1-4 complete.
 
 ## Log
 
@@ -466,4 +466,26 @@ Stage 5 (Sharded KV store) scoped into 8 days, Days 1-3 complete.
   with `noopLoop` never started, to freeze that window on purpose. Dedup and
   leader-cutoff mid-Join are also mutation-verified. 15/15 clean stage runs
   and 3/3 clean full-suite runs under `GOMAXPROCS=2 -race`.
+- 2026-09-28 — Stage 5 Day 4 (Groups serve only their shards) complete:
+  `GroupServer`, a new type polling the controller in-process (a real net/
+  rpc face turned out not to be needed yet either — revised from Day 3's own
+  prediction). A leader Proposes exactly `cfg.Num+1` as a `Config` log entry
+  (never the latest — configs adopt one at a time, for Day 5's sake); every
+  Put/Append is checked against `cfg` at the moment it APPLIES, not whenever
+  proposed. `Get` reuses `KVServer`/`Ctrler`'s Raft §8 gate — "read through
+  the log," TASKS.md's own suggested answer over a lease. Mutation testing
+  found two real gaps: `PutAppend`'s pre-check (a fast-path optimization)
+  masked the apply-time ownership check in every test that used it, so a
+  dedicated test proposes a Config directly ahead of a Put on one leader to
+  force the exact race the pre-check can't close; and `Config.Num == cfg.Num
+  +1` relaxed to `>` also passed everything, since the poll loop's own
+  discipline never generates a version-skipping proposal to expose the
+  difference — pinned with a direct skip-a-version test. Both gaps share a
+  shape: an optimization or a caller-side invariant can fully hide a missing
+  check in the code path meant to be the real authority. Inherits Stage 2's
+  known partition gap unchanged (a silently-partitioned leader keeps
+  answering from its own stale `cfg`) — flagged, not fixed, same as there.
+  20/20 clean stage runs and 3/3 clean full-suite runs under
+  `GOMAXPROCS=2 -race` (one pre-existing, already-documented Stage 2 flake —
+  `TestKVStoreConvergesAcrossCluster` — unrelated to this day, seen once).
 
