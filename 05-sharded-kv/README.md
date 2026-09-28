@@ -68,6 +68,54 @@ _(fill this in as you learn — one section per day, in your own words.)_
   real, unfinished work — noted rather than done, to keep this PR about
   sharding.
 
+### Day 2 — Configurations and rebalancing (pure logic)
+- `Join`, `Leave`, and `Move` are all pure functions from `Config` to `Config`
+  — no I/O, no randomness, no shared state. That's not a style preference,
+  it's the actual requirement: Day 3 will run these inside a Raft-replicated
+  state machine, and every replica applying the same log entry has to compute
+  the byte-identical result independently. A function that so much as ranged
+  over a map without sorting first would silently diverge between replicas.
+- The rebalance itself is the one piece of real logic: given the live group
+  set, assign shards so every group holds `floor(N/g)` or `ceil(N/g)` shards
+  while moving as few shards as possible off their current owner. The
+  algorithm is: sort the live group ids (the only source of a stable order,
+  since map iteration isn't one); the first `remainder` groups in that order
+  absorb the one-shard remainder; any shard whose current owner is dead, or
+  already over its new target, becomes an "orphan"; orphans get handed out,
+  in ascending shard order, to groups still under target. A shard already at
+  or under its group's target never moves.
+- Concretely: 3 balanced groups (4/3/3 over 10 shards) plus a 4th group
+  rebalances to 3/3/2/2, and exactly 2 shards move — the 2 the new group
+  needs, no more. I pinned that as an exact assertion rather than just an
+  upper bound, since "moves the minimum" is precise enough here to check
+  precisely, and a looser bound would have let a much worse (but still
+  "small") number of moves slip through unnoticed.
+- Group id 0 had to mean something: `Leave` can strip every group from a
+  shard (all groups left), and `Join` needs a valid starting point to build
+  on (bootstrapping from nothing). I reserved 0 as "unassigned" rather than
+  inventing a separate "no owner yet" type — `Validate` already rejects a
+  shard pointing at a group not in `Groups`, so an all-zero `Shards` array on
+  an empty `Config{}` falls out of the existing invariant for free instead of
+  needing a special case.
+- The property test (200 random Join/Leave sequences, 5-19 steps each, seeded
+  per trial for reproducibility) checks two things after *every single step*,
+  not just at the end: every shard routes to a live group, and no group holds
+  more than one shard more than any other. Checking only the final state
+  would miss a rebalance that transiently breaks the invariant and happens to
+  self-correct by the next step — the property has to hold at every version,
+  since a real controller (Day 3) serves `Query` for every historical `Num`,
+  not just the latest.
+- Mutation-checked two ways the algorithm could quietly go wrong: assigning
+  the one-shard remainder to the *last* groups in sorted order instead of the
+  first still balances correctly (every group within 1 of every other) but
+  breaks determinism and moves an extra shard on Join — caught by the exact
+  "moves exactly 2" assertion, not by the balance check, which is why both
+  exist. Forgetting to treat a dead group's shards as orphans (just keeping
+  every shard on whatever gid it already had) panics immediately with a
+  slice-bounds error on the very first Join from an empty config — a loud,
+  fast failure rather than a silent one, which is the outcome I actually want
+  from a mutant, not a passing test I have to distrust.
+
 _(continue per day)_
 
 ## Reference material
