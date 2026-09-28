@@ -170,6 +170,69 @@ _(fill this in as you learn — one section per day, in your own words.)_
   where a real net/rpc face (mirroring `ServeKVServer`) actually becomes
   necessary — adding it here would be building ahead of what this day proves.
 
+### Day 4 — Groups serve only their shards
+- Revised Day 3's own prediction: a real net/rpc face for `Ctrler` turned out
+  to NOT be necessary yet either. `GroupServer` polls the controller
+  in-process too, through its own `*CtrlerClerk` — proving the ownership
+  mechanism doesn't need real sockets between processes, only real Raft logs
+  within each one. Real networking is still coming; it's just further out
+  than I expected two days ago, most likely once migration (Day 5) needs
+  groups to actually pull data from each other across process boundaries.
+- The concrete answer to "what does 'through the log, not a local variable'
+  mean in code": `GroupServer.cfg` is written in exactly ONE place —
+  `applyLoop`, from a committed `Config` entry — and every ownership
+  decision (`Get`'s gate, `PutAppend`'s apply-time check) reads that same
+  field under the same lock. Every replica applies the identical sequence of
+  `Config` and `Put`/`Append` entries in the identical order, so there is no
+  point where two replicas — or this replica across its own election — could
+  disagree about which config was current for a SPECIFIC entry. A version
+  living in a variable `configPollLoop` wrote directly, instead, would break
+  that: followers wouldn't have it at all until their own poll tick, and a
+  freshly elected leader could momentarily believe whatever its predecessor's
+  poll loop last wrote, not what the cluster actually committed.
+- `Get` reuses `KVServer`'s and `Ctrler`'s identical Raft §8 gate
+  (leader + own-term no-op applied) before trusting `cfg` for anything —
+  "read through the log" was the answer to TASKS.md's own open question,
+  because the machinery already existed and a lease would have been new
+  machinery for the same guarantee.
+- One real design choice: `PutAppend` has TWO ownership checks, not one. The
+  pre-check (before proposing) is pure optimization — it keeps an
+  obviously-wrong-group write out of the Raft log entirely. The apply-time
+  check (inside `applyLoop`, against `cfg` as of that specific committed
+  index) is the actual authority. I didn't understand how separate these two
+  really were until mutation testing showed it: turning the apply-time check
+  into `if false` passed every single test in my first draft, because every
+  test routed writes through `PutAppend`, and the pre-check caught the
+  obvious cases before the mutant ever got a chance to matter. Had to write
+  a test that bypasses `PutAppend` entirely and proposes a Config directly
+  ahead of a Put on the same leader — reproducing "ownership revoked in the
+  gap between check and commit" deterministically, with no election timing
+  needed, since a single leader's own Proposes land in the log in the exact
+  order it calls them.
+- Second mutation gap, same session: `Config.Num == cfg.Num+1` relaxed to
+  `Config.Num > cfg.Num` also passed every existing test, because
+  `configPollLoop`'s own discipline (always request exactly `cfg.Num+1`,
+  never the latest) means the production code never actually generates a
+  version-skipping proposal — so nothing exercised the difference. It
+  matters anyway, for Day 5: a group that jumped straight from config 3 to
+  config 5 would never see config 4's transition at all, and migration has
+  to react to EVERY transition, not just wherever things end up. Pinned with
+  a direct test proposing Num 1 then Num 3 and checking the skip is rejected.
+- Both gaps share a shape worth naming: a fast-path optimization (the
+  pre-check) or an invariant the CALLER already upholds (the poll loop's own
+  discipline) can fully hide a missing check in the code path that's
+  supposed to be the real guarantee. The lesson isn't "test more" in
+  general, it's "test the authority, not just the common path that happens
+  to agree with it."
+- The known gap Stage 2's `Get` already carries is inherited here unchanged:
+  a leader silently partitioned away keeps answering from its own last-known
+  `cfg` — it doesn't know a newer config, reassigning its shards elsewhere,
+  has since committed on the other side of the partition. Closing that needs
+  a lease or read-index scheme, which TASKS.md itself offered as an
+  alternative to "read through the log" — flagged, not fixed, matching how
+  this exact gap has been left open (and re-flagged) at every earlier stage
+  that hit it.
+
 _(continue per day)_
 
 ## Reference material
