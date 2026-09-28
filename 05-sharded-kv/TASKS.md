@@ -34,7 +34,7 @@ correct while its shard moves.
       Building the fault-injectable multi-cluster test setup made this the
       third copy of Stage 3/4's `crashableEndpoint`, so it was extracted into
       `internal/kvtest` (the older two copies are not yet migrated onto it).
-- [ ] **Day 2 — Configurations and rebalancing (pure logic).** The `Config`
+- [x] **Day 2 — Configurations and rebalancing (pure logic).** The `Config`
       type (`Num`, `Shards [NShards]int` group ids, `Groups map[int][]string`)
       and `Join`/`Leave`/`Move` as PURE functions from config to config. The
       rebalance must be deterministic (every replica of the controller will run
@@ -42,6 +42,12 @@ correct while its shard moves.
       so this needs care) and must move the MINIMUM number of shards. Property
       tests over random join/leave sequences: every shard always assigned to a
       live group, load balanced to within 1 shard, minimal movement.
+      Verified: 3 balanced groups (4/3/3) + a 4th rebalances to 3/3/2/2 moving
+      exactly 2 shards (the minimum). 200 random Join/Leave sequences checked
+      for both invariants after every step, not just the final state. Group id
+      0 reserved as "unassigned" so `Leave`-ing every group and bootstrapping
+      `Join` from `Config{}` both fall out of `Validate`'s existing checks with
+      no special case.
 - [ ] **Day 3 — The shard controller.** Make the config history a replicated
       service: a Raft-backed state machine (reusing Stage 2's apply-loop,
       dedup, and leader-change machinery) with `Join`/`Leave`/`Move`/`Query`.

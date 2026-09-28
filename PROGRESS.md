@@ -1,12 +1,12 @@
 # Progress
 
 Current stage: **05-sharded-kv**
-Current day: **Day 2 — Configurations and rebalancing (pure logic)** (next up)
+Current day: **Day 3 — The shard controller** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
-Stage 5 (Sharded KV store) scoped into 8 days, Day 1 complete.
+Stage 5 (Sharded KV store) scoped into 8 days, Days 1-2 complete.
 
 ## Log
 
@@ -438,4 +438,18 @@ Stage 5 (Sharded KV store) scoped into 8 days, Day 1 complete.
   Extracted the crashable-endpoint cluster harness into `internal/kvtest` (its
   third copy); the Stage 3/4 copies are not yet migrated. 30/30 clean stage
   runs and 20/20 clean full-suite runs under `GOMAXPROCS=2 -race`.
+- 2026-09-28 — Stage 5 Day 2 (Configurations and rebalancing) complete:
+  `Join`/`Leave`/`Move` as pure `Config -> Config` functions, and `rebalance`
+  (sorted group ids for a deterministic remainder split, dead/over-target
+  shards become orphans, orphans handed out in ascending shard order). Group
+  id 0 reserved as "unassigned" so `Leave`-ing every group and bootstrapping
+  `Join` from `Config{}` both just fall out of `Validate`'s existing checks.
+  Pinned an exact case: 3 balanced groups (4/3/3) + a 4th rebalances to
+  3/3/2/2 moving exactly 2 shards. 200 random Join/Leave sequences checked
+  for full routability and within-1-shard balance after every step, not just
+  the end. Mutation-checked: assigning the remainder to the last groups
+  instead of the first still balances but moves an extra shard (caught by the
+  exact-2 assertion, not the balance check); treating a dead group's shards
+  as still-owned panics immediately on the first Join from empty (a loud
+  failure, not a silent one). 20/20 clean full-suite runs under `-race`.
 
