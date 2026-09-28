@@ -116,6 +116,60 @@ _(fill this in as you learn — one section per day, in your own words.)_
   fast failure rather than a silent one, which is the outcome I actually want
   from a mutant, not a passing test I have to distrust.
 
+### Day 3 — The shard controller
+- The honest test this day sets up ("is Stage 2's machinery really reusable,
+  or was it quietly specific to a string map?") came back positive with one
+  real wrinkle. `applyLoop`, the dedup table, notify channels, the leader-
+  check ticker, and no-op-on-election all carried over with the state
+  swapped from a map write to `c.configs = append(c.configs,
+  Join(latest, ...))` — Day 2's pure functions being the actual mutation
+  logic is exactly why this dropped in cleanly. The one thing that
+  couldn't carry over unchanged: `PutAppend`'s supersession check compares
+  the whole applied `Op` (`applied != op`), which only compiles because
+  every field of `kvstore.Op` is comparable. `ctrlerOp` isn't — it carries
+  `JoinGroups map[int][]string` and `LeaveGIDs []int` — so the check became
+  `applied.ClientID != op.ClientID || applied.SeqNum != op.SeqNum` instead.
+  Once I looked at it, that's arguably the more correct statement of what
+  the check actually means (identity of the request), not a workaround.
+- `Query` reuses `Get`'s exact Raft §8 gate (leader AND own-term no-op
+  applied) rather than skipping it because "it's just a read." A leader that
+  answered `Query` before its own no-op applied could omit a config version
+  the previous leader had already acknowledged to a client — the identical
+  failure mode Stage 3's fault test found in `Get`, just for config history
+  instead of key-value data.
+- Mutation-checked three ways, and the third one found a real hole. Removing
+  the dedup guard entirely: caught immediately (a retried Join appended a
+  second config version, `TestCtrlerRetriedJoinAppliesOnlyOnce` failed).
+  Removing the Raft §8 gate from `Query`: **nothing in the existing suite
+  noticed** — every test either drives a single settled leader or explicitly
+  waits for one, so the exact window the gate exists to close was never
+  actually exercised. That's the same class of gap this project has hit
+  before (a test that passes for reasons unrelated to what it's supposed to
+  check), so I built a dedicated whitebox test instead of trusting the
+  existing coverage: construct a `Ctrler` by hand around a node forced
+  straight to Leader (`BecomeCandidate`/`BecomeLeader`, `noopLoop` never
+  started), assert `Query` refuses, then propose the no-op myself and assert
+  it succeeds once applied. That test fails reliably against the mutant and
+  passes against the real gate.
+- `Move` validates against a snapshot of the current config taken right
+  before proposing, not at apply time — a group could theoretically `Leave`
+  in the gap between that check and the entry committing, landing a `Move`
+  on a group that's already gone. Flagged in `CtrlerErrInvalidArgs`'s own
+  doc comment as a known, accepted gap: closing it needs the apply-time
+  check to report "committed but rejected" back through the notify channel,
+  which is more machinery than a day about proving the replicated log itself
+  works calls for.
+- No snapshotting. `KVServer` didn't get it until Stage 2's Day 6, and a
+  config history — one entry per `Join`/`Leave`/`Move`, not per key written
+  — is orders of magnitude smaller than a KV store's state in any run this
+  project will actually do. If that stops being true, the same
+  `kvSnapshot`/`RaftStateSize` pattern carries over directly; it just isn't
+  earned yet.
+- `CtrlerClerk` talks to `*Ctrler` in-process, the same way `Clerk` talked to
+  `KVServer` before Stage 3 existed. Day 4 ("groups poll the controller") is
+  where a real net/rpc face (mirroring `ServeKVServer`) actually becomes
+  necessary — adding it here would be building ahead of what this day proves.
+
 _(continue per day)_
 
 ## Reference material

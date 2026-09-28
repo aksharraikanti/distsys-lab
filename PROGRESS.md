@@ -1,12 +1,12 @@
 # Progress
 
 Current stage: **05-sharded-kv**
-Current day: **Day 3 — The shard controller** (next up)
+Current day: **Day 4 — Groups serve only their shards** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
-Stage 5 (Sharded KV store) scoped into 8 days, Days 1-2 complete.
+Stage 5 (Sharded KV store) scoped into 8 days, Days 1-3 complete.
 
 ## Log
 
@@ -452,4 +452,18 @@ Stage 5 (Sharded KV store) scoped into 8 days, Days 1-2 complete.
   exact-2 assertion, not the balance check); treating a dead group's shards
   as still-owned panics immediately on the first Join from empty (a loud
   failure, not a silent one). 20/20 clean full-suite runs under `-race`.
+- 2026-09-28 — Stage 5 Day 3 (The shard controller) complete: `Ctrler`, a
+  Raft-replicated log of `Config` versions — 02-kv-store's apply-loop, dedup
+  table, notify channels, and no-op-on-election machinery, reused unchanged,
+  driving `configs = append(configs, Join/Leave/Move(latest, ...))` instead
+  of a map write. `Query` reuses `Get`'s exact Raft §8 gate. `CtrlerClerk` is
+  an in-process retry client (real RPC serving is Day 4's job, once groups
+  actually need to poll the controller). One real gap found by mutation
+  testing: removing `Query`'s §8 gate broke nothing in the initial suite —
+  no existing test forced the window between "leader" and "own no-op
+  applied" open long enough to observe it — so a whitebox test was added
+  that builds a `Ctrler` by hand around a node forced straight to Leader,
+  with `noopLoop` never started, to freeze that window on purpose. Dedup and
+  leader-cutoff mid-Join are also mutation-verified. 15/15 clean stage runs
+  and 3/3 clean full-suite runs under `GOMAXPROCS=2 -race`.
 
