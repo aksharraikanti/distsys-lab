@@ -48,13 +48,27 @@ correct while its shard moves.
       0 reserved as "unassigned" so `Leave`-ing every group and bootstrapping
       `Join` from `Config{}` both fall out of `Validate`'s existing checks with
       no special case.
-- [ ] **Day 3 — The shard controller.** Make the config history a replicated
+- [x] **Day 3 — The shard controller.** Make the config history a replicated
       service: a Raft-backed state machine (reusing Stage 2's apply-loop,
       dedup, and leader-change machinery) with `Join`/`Leave`/`Move`/`Query`.
       `Query(num)` returns an old config, `-1` the latest. Clerk-style client
       with retries. This is Stage 2 again in a new costume, and the test is
       whether the machinery really was reusable or whether Stage 2 was
       quietly specific to a string map.
+      Verified: the machinery carried over unchanged (apply-loop, dedup
+      table, notify channels, no-op-on-election, leader-check ticker) — only
+      the state mutated (append a `Config` computed by Day 2's pure
+      `Join`/`Leave`/`Move`, instead of a map write) and the same-op-equality
+      check (not comparable: `ctrlerOp` carries a map and a slice — compared
+      by `ClientID`+`SeqNum` instead). In-process `CtrlerClerk` only (real
+      RPC serving is Day 4's job, once groups actually need to poll it).
+      Retried Join/Leave/Move dedups to one config version; a leader cutoff
+      mid-Join converges via commit-before-cutoff or the client's retry
+      against the new leader, never zero or two new versions. A mutation
+      check caught a real gap in my own first test pass: removing `Query`'s
+      Raft §8 no-op gate broke nothing in the existing suite, so a dedicated
+      whitebox test (built by hand, bypassing `noopLoop`'s ticker) was added
+      to actually exercise the window it's supposed to close.
 - [ ] **Day 4 — Groups serve only their shards.** Each group polls the
       controller for the current config and serves a key only if its shard is
       assigned to it, otherwise `ErrWrongGroup` (the client refetches the
