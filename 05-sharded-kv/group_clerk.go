@@ -67,8 +67,12 @@ func (ck *ShardClerk) Get(key string) string {
 		}
 		if wrongGroup {
 			ck.cfg = ck.ctrl.Query(-1)
-			continue
 		}
+		// Always pause before retrying, even after a GroupErrWrongGroup
+		// round: a re-fetched config can still point at the SAME group
+		// while it's mid-migration for this shard (see GroupServer.Pull),
+		// in which case retrying immediately would just busy-spin until
+		// the pull lands instead of giving it a moment to.
 		time.Sleep(raft.HeartbeatInterval)
 	}
 }
@@ -100,8 +104,9 @@ func (ck *ShardClerk) putAppend(key, value, op string) {
 		}
 		if wrongGroup {
 			ck.cfg = ck.ctrl.Query(-1)
-			continue
 		}
+		// See Get's identical pause: a re-fetched config can still point at
+		// the same group mid-migration for this shard.
 		time.Sleep(raft.HeartbeatInterval)
 	}
 }

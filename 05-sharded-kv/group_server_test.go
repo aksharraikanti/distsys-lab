@@ -44,6 +44,21 @@ func newTestGroupCluster(n, gid int, ctrlers []*Ctrler) (nodes map[int]*raft.Raf
 	return nodes, servers, transport, cleanup
 }
 
+// wirePeers gives every replica of every group in groups a full directory
+// of every group (itself included, harmlessly) — see GroupServer.peers'
+// own doc comment for why this in-process resolution exists at all. Tests
+// that never cause a real ownership TRANSFER (only a group's very first
+// assignment, whose previous owner is gid 0) don't need this: applyLoop
+// only ever looks a shard's source group up in peers once it's actually
+// migrating something.
+func wirePeers(groups map[int][]*GroupServer) {
+	for _, servers := range groups {
+		for _, s := range servers {
+			s.SetPeers(groups)
+		}
+	}
+}
+
 // groupNodes exposes a GroupServer cluster's own raft.Raft handles, so
 // waitForGroupLeader (which just wants a map[int]*raft.Raft) works for a
 // group cluster the same way it works for newTestGroupCluster's own
@@ -179,15 +194,14 @@ func TestGroupServerRetriedPutAppendAppliesOnlyOnce(t *testing.T) {
 	}
 }
 
-// TestGroupServerMoveReroutesOwnershipAndShardClerkFollows proves the
-// end-to-end loop TASKS.md describes: once the controller reassigns a
-// shard, the new owner starts serving it and the OLD owner starts refusing
-// it, purely from each group's own poll loop picking up the change — and
-// ShardClerk, given no help beyond "the wrong group said no," transparently
-// refetches the config and finds the new owner on its own. The moved shard
-// is never written before the Move, so there's no data to lose — real
-// migration is Day 5's job; this day only proves the routing/refusal.
-func TestGroupServerMoveReroutesOwnershipAndShardClerkFollows(t *testing.T) {
+// TestGroupServerMoveMigratesDataAndShardClerkFollows proves the end-to-end
+// loop TASKS.md describes: once the controller reassigns a shard, the new
+// owner PULLS the shard's real data (not just an empty map) from the old
+// owner before it starts serving, the old owner starts refusing it once its
+// own poll loop catches up, and ShardClerk — given no help beyond "the
+// wrong group said no" — transparently refetches the config and finds the
+// new owner, with the pre-Move value intact.
+func TestGroupServerMoveMigratesDataAndShardClerkFollows(t *testing.T) {
 	_, ctrlers, _, ctrlerCleanup := newTestCtrlerCluster(3)
 	defer ctrlerCleanup()
 	admin := NewCtrlerClerk(ctrlers)
@@ -198,14 +212,21 @@ func TestGroupServerMoveReroutesOwnershipAndShardClerkFollows(t *testing.T) {
 	defer g1Cleanup()
 	nodes2, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers)
 	defer g2Cleanup()
+	groups := map[int][]*GroupServer{1: g1, 2: g2}
+	wirePeers(groups)
 
-	ck := NewShardClerk(admin, map[int][]*GroupServer{1: g1, 2: g2})
+	ck := NewShardClerk(admin, groups)
 
 	key := shardOwnedByGroup(cfg, 1)
 	shard := Key2Shard(key)
 
 	waitForGroupConfig(t, g1[waitForGroupLeader(t, nodes1, 2*time.Second)], cfg.Num, 2*time.Second)
 	waitForGroupConfig(t, g2[waitForGroupLeader(t, nodes2, 2*time.Second)], cfg.Num, 2*time.Second)
+
+	// Write BEFORE the Move — this is the whole point Day 4's version of
+	// this test explicitly deferred: proving the value survives the hand-
+	// off, not just that routing eventually points somewhere.
+	ck.Put(key, "before-move")
 
 	admin.Move(shard, 2)
 	afterMove := admin.Query(-1)
@@ -214,20 +235,25 @@ func TestGroupServerMoveReroutesOwnershipAndShardClerkFollows(t *testing.T) {
 	waitForGroupConfig(t, g2[waitForGroupLeader(t, nodes2, 2*time.Second)], afterMove.Num, 3*time.Second)
 
 	// ShardClerk still has the OLD config cached; it must transparently
-	// refetch on GroupErrWrongGroup and find group 2. Bounded, not a bare
-	// call, so a real routing bug fails the test instead of hanging it.
+	// refetch on GroupErrWrongGroup, find group 2, and see the MIGRATED
+	// value — not "" (which a routing-only fix, with no real data pull,
+	// would have returned). Bounded, not a bare call, so a real bug fails
+	// the test instead of hanging it.
 	done := make(chan string, 1)
-	go func() {
-		ck.Put(key, "moved")
-		done <- ck.Get(key)
-	}()
+	go func() { done <- ck.Get(key) }()
 	select {
 	case got := <-done:
-		if got != "moved" {
-			t.Fatalf("Get(%q) after Move = %q, want %q", key, got, "moved")
+		if got != "before-move" {
+			t.Fatalf("Get(%q) after Move = %q, want the migrated value %q", key, got, "before-move")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("ShardClerk never converged on the new owner after Move")
+	}
+
+	// A further write through the new owner must also work.
+	ck.Put(key, "after-move")
+	if got := ck.Get(key); got != "after-move" {
+		t.Fatalf("Get(%q) after a post-migration write = %q, want %q", key, got, "after-move")
 	}
 
 	g1LeaderID := waitForGroupLeader(t, nodes1, 2*time.Second)
@@ -309,6 +335,7 @@ func TestGroupServerGetRefusesBeforeOwnNoopApplied(t *testing.T) {
 		gid:            1,
 		ctrl:           NewCtrlerClerk(ctrlers),
 		store:          make(map[string]string),
+		migrating:      make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
 		stopCh:         make(chan struct{}),
@@ -376,6 +403,7 @@ func TestGroupServerRejectsWriteThatArrivesAfterConfigRevokesOwnership(t *testin
 		gid:            1,
 		ctrl:           NewCtrlerClerk(ctrlers),
 		store:          make(map[string]string),
+		migrating:      make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
 		stopCh:         make(chan struct{}),
@@ -414,22 +442,15 @@ func TestGroupServerRejectsWriteThatArrivesAfterConfigRevokesOwnership(t *testin
 	}
 
 	// Prove the store itself was never touched (not just that Get refuses
-	// to serve it): restore ownership and check the key is still unset,
-	// not silently holding the rejected write's value.
-	restored := revoked
-	restored.Num = 3
-	restored.Shards[shard] = 1
-	if _, _, isLeader := rf.Propose(groupOp{Type: "Config", Config: restored}); !isLeader {
-		t.Fatal("Propose(Config) should succeed on the leader")
-	}
-	waitForGroupConfig(t, s, restored.Num, time.Second)
-
-	var reply GroupGetReply
-	if err := s.Get(&GroupGetArgs{Key: key}, &reply); err != nil {
-		t.Fatalf("Get RPC itself should not error: %v", err)
-	}
-	if reply.Err != GroupErrNoKey {
-		t.Fatalf("the rejected Put must never have mutated the store: Get returned %v (value %q), want ErrNoKey", reply.Err, reply.Value)
+	// to serve it): check s.store directly. Getting ownership back to gid 1
+	// at this point would require a real migration FROM gid 2 (Day 5), which
+	// this test has no donor wired up for — the store itself is the
+	// authority here, not another round trip through Get.
+	s.mu.Lock()
+	_, stillSet := s.store[key]
+	s.mu.Unlock()
+	if stillSet {
+		t.Fatalf("the rejected Put must never have mutated the store: store[%q] is set", key)
 	}
 }
 
@@ -462,6 +483,7 @@ func TestGroupServerRejectsOutOfOrderConfig(t *testing.T) {
 		gid:            1,
 		ctrl:           NewCtrlerClerk(ctrlers),
 		store:          make(map[string]string),
+		migrating:      make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
 		stopCh:         make(chan struct{}),
@@ -497,5 +519,301 @@ func TestGroupServerRejectsOutOfOrderConfig(t *testing.T) {
 	s.mu.Unlock()
 	if got != 1 {
 		t.Fatalf("a Config that skips a version (1 -> 3, missing 2) must be rejected: s.cfg.Num = %d, want 1", got)
+	}
+}
+
+// TestGroupServerDedupTableMovesWithShard is TASKS.md's own named hazard:
+// "the dedup table moves WITH the shard... otherwise a client retry that
+// spans a migration double-applies — Stage 2 Day 3's bug, reintroduced."
+// A client Appends once (accepted, SeqNum recorded on the OLD owner), the
+// shard migrates for real (through the actual Pull/Migrate protocol, peers
+// wired, no shortcuts), and the SAME client retries the IDENTICAL request
+// directly against the NEW owner — simulating a client that never saw the
+// first ack and resent it after the shard had already moved. The new owner
+// must recognize it as already-applied, not append "x" a second time.
+func TestGroupServerDedupTableMovesWithShard(t *testing.T) {
+	_, ctrlers, _, ctrlerCleanup := newTestCtrlerCluster(3)
+	defer ctrlerCleanup()
+	admin := NewCtrlerClerk(ctrlers)
+	admin.Join(map[int][]string{1: addrsFor(1), 2: addrsFor(2)})
+	cfg := admin.Query(-1)
+
+	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers)
+	defer g1Cleanup()
+	nodes2, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers)
+	defer g2Cleanup()
+	groups := map[int][]*GroupServer{1: g1, 2: g2}
+	wirePeers(groups)
+
+	key := shardOwnedByGroup(cfg, 1)
+	shard := Key2Shard(key)
+
+	g1LeaderID := waitForGroupLeader(t, nodes1, 2*time.Second)
+	waitForGroupConfig(t, g1[g1LeaderID], cfg.Num, 2*time.Second)
+
+	args := &GroupPutAppendArgs{Key: key, Value: "x", Op: "Append", ClientID: 55, SeqNum: 1}
+	var r1 GroupPutAppendReply
+	if err := g1[g1LeaderID].PutAppend(args, &r1); err != nil || r1.Err != GroupOK {
+		t.Fatalf("initial Append on the old owner failed: err=%v reply=%+v", err, r1)
+	}
+
+	admin.Move(shard, 2)
+	afterMove := admin.Query(-1)
+	waitForGroupConfig(t, g1[waitForGroupLeader(t, nodes1, 2*time.Second)], afterMove.Num, 3*time.Second)
+	g2LeaderID := waitForGroupLeader(t, nodes2, 2*time.Second)
+	waitForGroupConfig(t, g2[g2LeaderID], afterMove.Num, 3*time.Second)
+
+	// Wait for the actual pull to land (not just the config transition) —
+	// Get stops saying GroupErrWrongGroup once migration completes.
+	waitFor(t, 3*time.Second, func() bool {
+		var reply GroupGetReply
+		err := g2[g2LeaderID].Get(&GroupGetArgs{Key: key}, &reply)
+		return err == nil && reply.Err != GroupErrWrongGroup
+	})
+
+	// The identical retry, same ClientID+SeqNum, now against the NEW owner.
+	var r2 GroupPutAppendReply
+	if err := g2[g2LeaderID].PutAppend(args, &r2); err != nil || r2.Err != GroupOK {
+		t.Fatalf("retried Append on the new owner failed: err=%v reply=%+v", err, r2)
+	}
+
+	var g GroupGetReply
+	if err := g2[g2LeaderID].Get(&GroupGetArgs{Key: key}, &g); err != nil || g.Err != GroupOK {
+		t.Fatalf("Get on the new owner failed: err=%v reply=%+v", err, g)
+	}
+	if g.Value != "x" {
+		t.Fatalf("a retry that spans a migration must not double-apply: value = %q, want %q", g.Value, "x")
+	}
+}
+
+// TestGroupServerRefusesShardUntilMigrationCompletes is a whitebox
+// reproduction of the exact window TASKS.md calls out: "operations on a
+// shard mid-move must wait or fail with ErrWrongGroup, never be lost or
+// served stale." Config and Migrate entries are proposed by hand — no
+// configPollLoop or migrationLoop running — to freeze "ownership granted,
+// data not yet pulled" open long enough to observe it, the same technique
+// Day 3's and Day 4's own whitebox no-op-gate tests use for their windows.
+func TestGroupServerRefusesShardUntilMigrationCompletes(t *testing.T) {
+	_, ctrlers, _, ctrlerCleanup := newTestCtrlerCluster(3)
+	defer ctrlerCleanup()
+
+	rf := raft.NewRaft(0, nil, raft.NewFakeTransport())
+	if err := rf.BecomeCandidate(); err != nil {
+		t.Fatalf("BecomeCandidate: %v", err)
+	}
+	if err := rf.BecomeLeader(); err != nil {
+		t.Fatalf("BecomeLeader: %v", err)
+	}
+	go rf.RunApplyLoop()
+	defer rf.StopElectionTimer()
+
+	s := &GroupServer{
+		rf:             rf,
+		gid:            2,
+		ctrl:           NewCtrlerClerk(ctrlers),
+		store:          make(map[string]string),
+		migrating:      make(map[int]int),
+		notifyChans:    make(map[int]chan groupApplyResult),
+		duplicateTable: make(map[int64]int64),
+		stopCh:         make(chan struct{}),
+	}
+	go s.applyLoop()
+	defer s.Stop()
+
+	key := "probe-0"
+	shard := Key2Shard(key)
+
+	v1 := Config{Num: 1, Groups: map[int][]string{1: addrsFor(1), 2: addrsFor(2)}}
+	v1.Shards[shard] = 1 // owned by gid 1, not this server (gid 2)
+	if _, _, isLeader := rf.Propose(groupOp{Type: "Config", Config: v1}); !isLeader {
+		t.Fatal("Propose(Config) should succeed on the leader")
+	}
+	waitForGroupConfig(t, s, 1, time.Second)
+
+	v2 := v1
+	v2.Num = 2
+	v2.Shards[shard] = 2 // now gained by this server, from a REAL prior owner
+	term := rf.Term()
+	if _, _, isLeader := rf.Propose(groupOp{Type: "Config", Config: v2}); !isLeader {
+		t.Fatal("Propose(Config) should succeed on the leader")
+	}
+	if _, _, isLeader := rf.Propose(groupOp{Type: "Noop"}); !isLeader {
+		t.Fatal("Propose(Noop) should succeed on the leader")
+	}
+	waitFor(t, time.Second, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.cfg.Num == 2 && s.noopAppliedTerm == term
+	})
+
+	var before GroupGetReply
+	if err := s.Get(&GroupGetArgs{Key: key}, &before); err != nil {
+		t.Fatalf("Get RPC itself should not error: %v", err)
+	}
+	if before.Err != GroupErrWrongGroup {
+		t.Fatalf("Get on a shard gained but not yet migrated must refuse, got %v", before.Err)
+	}
+
+	if _, _, isLeader := rf.Propose(groupOp{
+		Type: "Migrate", Shard: shard,
+		Data:     map[string]string{key: "pulled"},
+		DupTable: map[int64]int64{7: 3},
+	}); !isLeader {
+		t.Fatal("Propose(Migrate) should succeed on the leader")
+	}
+	waitFor(t, time.Second, func() bool {
+		var r GroupGetReply
+		return s.Get(&GroupGetArgs{Key: key}, &r) == nil && r.Err == GroupOK
+	})
+
+	var after GroupGetReply
+	if err := s.Get(&GroupGetArgs{Key: key}, &after); err != nil || after.Value != "pulled" {
+		t.Fatalf("Get after migration lands = (err=%v, value=%q), want (nil, %q)", err, after.Value, "pulled")
+	}
+	s.mu.Lock()
+	gotSeq := s.duplicateTable[7]
+	s.mu.Unlock()
+	if gotSeq != 3 {
+		t.Fatalf("migrated dedup entry not merged: duplicateTable[7] = %d, want 3", gotSeq)
+	}
+}
+
+// TestGroupServerPullGates checks Pull's two "not ready" conditions
+// directly — neither needs a raft cluster at all, since Pull never touches
+// s.rf: it answers purely from cfg/migrating/store under s.mu.
+func TestGroupServerPullGates(t *testing.T) {
+	t.Run("refuses until donor catches up to the transition", func(t *testing.T) {
+		donor := &GroupServer{
+			gid:            1,
+			cfg:            Config{Num: 1},
+			store:          map[string]string{"k": "v"},
+			migrating:      make(map[int]int),
+			duplicateTable: make(map[int64]int64),
+		}
+		var reply PullReply
+		if err := donor.Pull(&PullArgs{Shard: 0, ConfigNum: 2}, &reply); err != nil {
+			t.Fatalf("Pull RPC itself should not error: %v", err)
+		}
+		if reply.Err != GroupErrNotReady {
+			t.Fatalf("Pull asking for a config version the donor hasn't reached yet must refuse, got %v", reply.Err)
+		}
+
+		donor.cfg.Num = 2
+		var reply2 PullReply
+		if err := donor.Pull(&PullArgs{Shard: 0, ConfigNum: 2}, &reply2); err != nil {
+			t.Fatalf("Pull RPC itself should not error: %v", err)
+		}
+		if reply2.Err != GroupOK {
+			t.Fatalf("Pull once the donor has caught up should succeed, got %v", reply2.Err)
+		}
+	})
+
+	t.Run("refuses a shard the donor itself is still migrating in", func(t *testing.T) {
+		donor := &GroupServer{
+			gid:            2,
+			cfg:            Config{Num: 5},
+			store:          make(map[string]string),
+			migrating:      map[int]int{3: 1}, // donor's own pull from gid 1 still pending
+			duplicateTable: make(map[int64]int64),
+		}
+		var reply PullReply
+		if err := donor.Pull(&PullArgs{Shard: 3, ConfigNum: 1}, &reply); err != nil {
+			t.Fatalf("Pull RPC itself should not error: %v", err)
+		}
+		if reply.Err != GroupErrNotReady {
+			t.Fatalf("Pull for a shard the donor is itself still migrating in must refuse, got %v", reply.Err)
+		}
+	})
+}
+
+// TestGroupServerMigratedDedupNeverRegresses checks the OTHER half of
+// applyLoop's Migrate merge: take the MAX SeqNum per ClientID, never just
+// overwrite. Every other test's migrated DupTable entries land on a client
+// this recipient has never seen before, so a plain overwrite would have
+// passed them too — this one specifically gives the recipient a HIGHER
+// SeqNum for a client BEFORE the migration, from an independent write to a
+// shard it already owned, then migrates in a LOWER, stale SeqNum for that
+// same client. Overwriting would walk duplicateTable backwards and let an
+// already-applied write be re-accepted as if it were new.
+func TestGroupServerMigratedDedupNeverRegresses(t *testing.T) {
+	_, ctrlers, _, ctrlerCleanup := newTestCtrlerCluster(3)
+	defer ctrlerCleanup()
+
+	rf := raft.NewRaft(0, nil, raft.NewFakeTransport())
+	if err := rf.BecomeCandidate(); err != nil {
+		t.Fatalf("BecomeCandidate: %v", err)
+	}
+	if err := rf.BecomeLeader(); err != nil {
+		t.Fatalf("BecomeLeader: %v", err)
+	}
+	go rf.RunApplyLoop()
+	defer rf.StopElectionTimer()
+
+	s := &GroupServer{
+		rf:             rf,
+		gid:            2,
+		ctrl:           NewCtrlerClerk(ctrlers),
+		store:          make(map[string]string),
+		migrating:      make(map[int]int),
+		notifyChans:    make(map[int]chan groupApplyResult),
+		duplicateTable: make(map[int64]int64),
+		stopCh:         make(chan struct{}),
+	}
+	go s.applyLoop()
+	defer s.Stop()
+
+	// This server already owns every shard EXCEPT shard 0 from the start
+	// (shard 0 is what migrates in later), and has already applied client
+	// 42's SeqNum 5 write directly, to a key on one of the shards it
+	// already owns.
+	own := Config{Num: 1, Groups: map[int][]string{1: addrsFor(1), 2: addrsFor(2)}}
+	for i := range own.Shards {
+		own.Shards[i] = 2
+	}
+	own.Shards[0] = 1
+	if _, _, isLeader := rf.Propose(groupOp{Type: "Config", Config: own}); !isLeader {
+		t.Fatal("Propose(Config) should succeed on the leader")
+	}
+	waitForGroupConfig(t, s, 1, time.Second)
+	ownedKey := shardOwnedByGroup(own, 2)
+	writeErr := s.proposeAndWait(groupOp{Type: "Put", Key: ownedKey, Value: "v", ClientID: 42, SeqNum: 5})
+	if writeErr != GroupOK {
+		t.Fatalf("initial write failed: %v", writeErr)
+	}
+	s.mu.Lock()
+	before := s.duplicateTable[42]
+	s.mu.Unlock()
+	if before != 5 {
+		t.Fatalf("duplicateTable[42] = %d after the initial write, want 5", before)
+	}
+
+	// Now gain shard 0 from gid 1, and migrate in a table where client 42's
+	// entry is STALE (SeqNum 3, lower than what this replica already has).
+	gain := own
+	gain.Num = 2
+	gain.Shards[0] = 2
+	if _, _, isLeader := rf.Propose(groupOp{Type: "Config", Config: gain}); !isLeader {
+		t.Fatal("Propose(Config) should succeed on the leader")
+	}
+	waitForGroupConfig(t, s, 2, time.Second)
+	if _, _, isLeader := rf.Propose(groupOp{
+		Type: "Migrate", Shard: 0,
+		Data:     map[string]string{},
+		DupTable: map[int64]int64{42: 3},
+	}); !isLeader {
+		t.Fatal("Propose(Migrate) should succeed on the leader")
+	}
+	waitFor(t, time.Second, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		_, migrating := s.migrating[0]
+		return !migrating
+	})
+
+	s.mu.Lock()
+	after := s.duplicateTable[42]
+	s.mu.Unlock()
+	if after != 5 {
+		t.Fatalf("a stale migrated dedup entry (SeqNum 3) must not regress duplicateTable[42]: got %d, want 5", after)
 	}
 }

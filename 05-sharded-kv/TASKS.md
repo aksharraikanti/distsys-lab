@@ -96,13 +96,35 @@ correct while its shard moves.
       state. The known partition gap Stage 2's `Get` already carries (a
       silently-partitioned leader keeps answering from its own stale view)
       applies here too, unresolved, same as there.
-- [ ] **Day 5 — Shard migration.** When a group's config changes, the new owner
+- [x] **Day 5 — Shard migration.** When a group's config changes, the new owner
       PULLS the shards it gained from their previous owner, and the dedup
       table moves WITH the shard (otherwise a client retry that spans a
       migration double-applies — Stage 2 Day 3's bug, reintroduced). Config
       changes are themselves log entries, so every replica in a group agrees
       on exactly when a shard changed hands. Operations on a shard mid-move
       must wait or fail with `ErrWrongGroup`, never be lost or served stale.
+      Adopting a Config that grants a REAL shard (previous owner != 0, != me)
+      marks it `migrating` instead of ready; `migrationLoop` (leader-only)
+      Pulls it and Proposes a `Migrate` entry once data actually arrives —
+      landing through the log too, so every replica gets the same data at
+      the same point, not just the leader that happened to fetch it. `Pull`
+      only answers once the donor's OWN applied config has caught up to the
+      transition (its data is provably frozen by then) AND the donor isn't
+      itself still migrating that shard in — the second check matters for a
+      shard reassigned again before its first migration finishes; without
+      it a donor could hand off data it doesn't actually have complete yet.
+      Whole `duplicateTable` travels with every migration (not scoped per
+      shard — a client's SeqNum sequence isn't shard-scoped either), merged
+      by MAX per ClientID, never overwritten. Mutation testing found two
+      real gaps in the first pass: skipping the migrating-gate entirely
+      passed nothing new (a whole test failed, good), but the dedup merge's
+      `if seq > existing` collapsing to a plain overwrite passed EVERY
+      existing test, because every one of them only ever migrated a
+      ClientID this recipient had never independently seen — a dedicated
+      test now pre-seeds a higher SeqNum on the recipient before migrating
+      in a stale, lower one for the same client, and checks it doesn't
+      regress. No garbage collection yet (Day 6's explicit "challenge"
+      scope) — the old owner keeps a moved shard's data forever, unused.
 - [ ] **Day 6 — Concurrent clients through reconfiguration.** Many clients
       hammering keys while groups join and leave. The invariant is Stage 2's,
       now with data moving underneath: every acknowledged write is visible,
