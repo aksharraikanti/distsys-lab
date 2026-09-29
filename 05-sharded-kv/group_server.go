@@ -16,9 +16,10 @@ import (
 // project on the same handful of derived intervals (see 03-connection-
 // pooling's own reasoning for doing the same with its pool timeouts).
 const (
-	groupCommitTimeout       = 20 * raft.ElectionTimeoutMax
-	groupLeaderCheckInterval = raft.HeartbeatInterval
-	groupConfigPollInterval  = raft.HeartbeatInterval
+	groupCommitTimeout         = 20 * raft.ElectionTimeoutMax
+	groupLeaderCheckInterval   = raft.HeartbeatInterval
+	groupConfigPollInterval    = raft.HeartbeatInterval
+	groupMigrationPollInterval = raft.HeartbeatInterval
 )
 
 // groupApplyResult is what applyLoop hands back to a waiting PutAppend
@@ -58,6 +59,25 @@ type GroupServer struct {
 	cfg   Config
 	store map[string]string
 
+	// migrating[shard] is the group id this replica pulled (or still needs
+	// to pull) shard from, present only for a shard this group has gained
+	// ownership of but not yet received data for. A shard counts as ready
+	// to serve only once it's both in cfg.Shards (owned) AND absent from
+	// migrating — see ownsLocked. Written only by applyLoop, same as cfg:
+	// a Config entry that grants a NEW shard adds an entry; a Migrate entry
+	// that successfully lands the pulled data removes it.
+	migrating map[int]int
+
+	// peers resolves another group's id to its own replica set, for
+	// migrationLoop's Pull calls. In-process, the same scoping choice (and
+	// the same reason) CtrlerClerk/ShardClerk already made: proving the
+	// migration PROTOCOL is correct doesn't need real sockets between
+	// processes, only real Raft logs within each one. A real deployment
+	// would dial the addresses a Config's own Groups map already carries
+	// instead — set via SetPeers since a group's peers aren't all known
+	// before every group in a test has been constructed.
+	peers map[int][]*GroupServer
+
 	notifyChans    map[int]chan groupApplyResult
 	duplicateTable map[int64]int64
 
@@ -77,6 +97,7 @@ func NewGroupServer(rf *raft.Raft, gid int, ctrl *CtrlerClerk) *GroupServer {
 		gid:            gid,
 		ctrl:           ctrl,
 		store:          make(map[string]string),
+		migrating:      make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
 		stopCh:         make(chan struct{}),
@@ -84,7 +105,19 @@ func NewGroupServer(rf *raft.Raft, gid int, ctrl *CtrlerClerk) *GroupServer {
 	go s.applyLoop()
 	go s.noopLoop()
 	go s.configPollLoop()
+	go s.migrationLoop()
 	return s
+}
+
+// SetPeers gives this GroupServer a way to reach every other group it might
+// ever need to pull a shard from. See the peers field's own doc comment for
+// why this is a setter rather than a constructor argument: a test (or a
+// real deployment resolving addresses lazily) can't always know the full
+// set of groups before every one of them has been constructed.
+func (s *GroupServer) SetPeers(peers map[int][]*GroupServer) {
+	s.mu.Lock()
+	s.peers = peers
+	s.mu.Unlock()
 }
 
 // Stop terminates this GroupServer's background goroutines. Safe to call
@@ -95,10 +128,18 @@ func (s *GroupServer) Stop() {
 	})
 }
 
-// ownsLocked reports whether this group currently owns key's shard, per
-// this replica's own applied Config. Caller must hold s.mu.
+// ownsLocked reports whether this group is actually ready to serve key's
+// shard: cfg says this group is the owner AND the shard isn't still waiting
+// on a migration pull. Both halves matter — gaining a shard in cfg without
+// its data would otherwise serve empty/wrong answers for keys that really
+// do have a value, just not on this replica yet. Caller must hold s.mu.
 func (s *GroupServer) ownsLocked(key string) bool {
-	return s.cfg.Shards[Key2Shard(key)] == s.gid
+	shard := Key2Shard(key)
+	if s.cfg.Shards[shard] != s.gid {
+		return false
+	}
+	_, stillMigrating := s.migrating[shard]
+	return !stillMigrating
 }
 
 // applyLoop is 02-kv-store's applyLoop with a third command kind. Put/Append
@@ -118,6 +159,24 @@ func (s *GroupServer) ownsLocked(key string) bool {
 // is a strict sequence, so "not exactly next" can only mean "already
 // applied" or "out of order," never "a real update this replica hasn't
 // seen yet."
+//
+// Adopting a Config that GAINS this group a shard it didn't own before adds
+// an entry to migrating instead of serving it immediately — UNLESS the
+// shard's previous owner was gid 0 (never really owned by anyone, e.g. the
+// very first config a fresh deployment ever adopts), which has no data to
+// pull and is ready the instant ownership is. The old owner (op.Config's
+// predecessor, i.e. whatever s.cfg was a moment ago, captured before this
+// line overwrites it) is recorded so migrationLoop knows who to Pull from —
+// captured NOW because s.cfg is about to be overwritten, and nothing else
+// remembers what it used to be.
+//
+// A Migrate entry lands one shard's pulled data: merge its key/value pairs
+// into store, merge its dedup entries into duplicateTable by taking the
+// MAX SeqNum per ClientID (never overwrite a higher one this replica may
+// have already applied independently — the donor's table is a snapshot,
+// not a fresher source of truth), then clear the migrating entry. Both
+// merges are idempotent, so a duplicate or re-proposed Migrate for a shard
+// that's already landed is silently a no-op, not an error.
 func (s *GroupServer) applyLoop() {
 	for {
 		var msg raft.ApplyMsg
@@ -140,7 +199,31 @@ func (s *GroupServer) applyLoop() {
 			result.err = GroupOK
 		case "Config":
 			if op.Config.Num == s.cfg.Num+1 {
+				old := s.cfg
 				s.cfg = op.Config
+				for shard, newOwner := range op.Config.Shards {
+					if newOwner != s.gid {
+						continue
+					}
+					prevOwner := old.Shards[shard]
+					if prevOwner == s.gid || prevOwner == 0 {
+						continue // already owned it, or nobody ever did
+					}
+					s.migrating[shard] = prevOwner
+				}
+			}
+			result.err = GroupOK
+		case "Migrate":
+			if _, stillMigrating := s.migrating[op.Shard]; stillMigrating {
+				for k, v := range op.Data {
+					s.store[k] = v
+				}
+				for clientID, seq := range op.DupTable {
+					if seq > s.duplicateTable[clientID] {
+						s.duplicateTable[clientID] = seq
+					}
+				}
+				delete(s.migrating, op.Shard)
 			}
 			result.err = GroupOK
 		case "Put", "Append":
@@ -242,6 +325,85 @@ func (s *GroupServer) configPollLoop() {
 	}
 }
 
+// migrationLoop is this group's half of "the new owner PULLS the shards it
+// gained from their previous owner" (TASKS.md): once per tick, a leader
+// checks for any shard still in migrating, Pulls it from the recorded
+// source group, and — once the pull actually returns data — Proposes a
+// Migrate entry so every replica in THIS group lands the data identically,
+// the same "through the log" reasoning applyLoop's own doc comment gives
+// for Config. Fire-and-forget, not proposeAndWait: Migrate's effect is
+// idempotent (see applyLoop), so if this Propose is lost to a leadership
+// change before it commits, the next tick (by this node or whoever leads
+// next) just re-pulls and re-proposes — no different from how
+// configPollLoop handles the same failure mode for Config entries.
+//
+// proposed tracks, per shard, whether THIS node already has a Migrate entry
+// outstanding for it, so a slow-committing proposal isn't re-sent every
+// tick; reset whenever this node is no longer observed as leader, for the
+// identical correctness reason configPollLoop's lastProposed is (see its
+// own doc comment) — an entry proposed while leader that never actually
+// committed must be retried once leadership is regained, not believed
+// forever pending.
+func (s *GroupServer) migrationLoop() {
+	ticker := time.NewTicker(groupMigrationPollInterval)
+	defer ticker.Stop()
+
+	proposed := make(map[int]bool)
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			if s.rf.State() != raft.Leader {
+				proposed = make(map[int]bool)
+				continue
+			}
+			s.mu.Lock()
+			pending := make(map[int]int, len(s.migrating))
+			for shard, from := range s.migrating {
+				pending[shard] = from
+			}
+			configNum := s.cfg.Num
+			peers := s.peers
+			s.mu.Unlock()
+
+			for shard, fromGID := range pending {
+				if proposed[shard] {
+					continue
+				}
+				reply, ok := s.pullFrom(peers[fromGID], shard, configNum)
+				if !ok {
+					continue
+				}
+				if _, _, isLeader := s.rf.Propose(groupOp{Type: "Migrate", Shard: shard, Data: reply.Data, DupTable: reply.DupTable}); isLeader {
+					proposed[shard] = true
+				}
+			}
+		}
+	}
+}
+
+// pullFrom tries each replica of a donor group in turn until one actually
+// answers — the same round-robin-until-success shape every Clerk in this
+// project uses — and reports ok=false (try again next tick) rather than
+// blocking if none does or the donor says GroupErrNotReady. Migration must
+// never block the caller: this runs on migrationLoop's own goroutine, which
+// still has other shards (and Config polling, on a different goroutine
+// entirely) to get to.
+func (s *GroupServer) pullFrom(donors []*GroupServer, shard, configNum int) (PullReply, bool) {
+	args := &PullArgs{Shard: shard, ConfigNum: configNum}
+	for _, donor := range donors {
+		var reply PullReply
+		if err := donor.Pull(args, &reply); err != nil {
+			continue
+		}
+		if reply.Err == GroupOK {
+			return reply, true
+		}
+	}
+	return PullReply{}, false
+}
+
 // proposeAndWait is Ctrler's own proposeAndWait, adapted to groupOp/
 // groupApplyResult: the supersession check still compares ClientID/SeqNum
 // rather than the whole op (groupOp carries a Config field, not
@@ -337,5 +499,53 @@ func (s *GroupServer) PutAppend(args *GroupPutAppendArgs, reply *GroupPutAppendR
 
 	op := groupOp{Type: args.Op, Key: args.Key, Value: args.Value, ClientID: args.ClientID, SeqNum: args.SeqNum}
 	reply.Err = s.proposeAndWait(op)
+	return nil
+}
+
+// Pull answers a NEW owner's request for one shard's frozen data — called
+// on the group that used to (or may still) own it, not gated by Get/
+// PutAppend's own leader-and-noop rule, because ANY replica that has
+// applied through args.ConfigNum has an identical, stable answer: once this
+// replica's own cfg reaches that version, its own apply-time ownership
+// check (applyLoop's Put/Append case) permanently refuses that shard from
+// then on, so nothing can mutate it further — the data is frozen, whether
+// this replica happens to be leader right now or not.
+//
+// Two ways to say "not yet": s.cfg.Num < args.ConfigNum means this replica
+// hasn't itself caught up to the transition that would freeze the shard —
+// answering anyway could hand back a snapshot missing a write still about
+// to land. Being asked for a shard this replica is ITSELF still migrating
+// in (still in s.migrating) means its own copy isn't complete yet either,
+// even though cfg may already have caught up — answering with what's there
+// would silently hand off partial data. Both cases return GroupErrNotReady;
+// the caller's migrationLoop just retries next tick, no different from any
+// other polling loop in this stage.
+func (s *GroupServer) Pull(args *PullArgs, reply *PullReply) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.cfg.Num < args.ConfigNum {
+		reply.Err = GroupErrNotReady
+		return nil
+	}
+	if _, stillMigrating := s.migrating[args.Shard]; stillMigrating {
+		reply.Err = GroupErrNotReady
+		return nil
+	}
+
+	data := make(map[string]string)
+	for k, v := range s.store {
+		if Key2Shard(k) == args.Shard {
+			data[k] = v
+		}
+	}
+	dup := make(map[int64]int64, len(s.duplicateTable))
+	for clientID, seq := range s.duplicateTable {
+		dup[clientID] = seq
+	}
+
+	reply.Data = data
+	reply.DupTable = dup
+	reply.Err = GroupOK
 	return nil
 }

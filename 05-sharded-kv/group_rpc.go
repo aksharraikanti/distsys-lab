@@ -16,6 +16,14 @@ const (
 	GroupErrWrongLeader GroupErr = "ErrWrongLeader"
 	GroupErrWrongGroup  GroupErr = "ErrWrongGroup"
 	GroupErrTimeout     GroupErr = "ErrTimeout"
+
+	// GroupErrNotReady is Pull's own answer: this replica hasn't yet
+	// applied the Config entry that revoked its ownership of the requested
+	// shard, so its data for that shard isn't frozen yet — some write still
+	// in flight could land after this snapshot was taken. See Pull's doc
+	// comment for why waiting for that, rather than serving early, is what
+	// makes a migrated shard's data complete.
+	GroupErrNotReady GroupErr = "ErrNotReady"
 )
 
 type GroupGetArgs struct {
@@ -38,4 +46,20 @@ type GroupPutAppendArgs struct {
 
 type GroupPutAppendReply struct {
 	Err GroupErr
+}
+
+// PullArgs asks a (possibly former) owner for one shard's frozen data.
+// ConfigNum is the config version AT WHICH the caller gained the shard —
+// the donor only answers once its OWN applied config has reached at least
+// that version (GroupErrNotReady otherwise), which is what guarantees the
+// data handed back is complete. See Pull's doc comment.
+type PullArgs struct {
+	Shard     int
+	ConfigNum int
+}
+
+type PullReply struct {
+	Err      GroupErr
+	Data     map[string]string
+	DupTable map[int64]int64
 }

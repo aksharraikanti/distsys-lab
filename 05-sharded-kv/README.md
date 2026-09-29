@@ -233,6 +233,70 @@ _(fill this in as you learn — one section per day, in your own words.)_
   this exact gap has been left open (and re-flagged) at every earlier stage
   that hit it.
 
+### Day 5 — Shard migration
+- The dedup table travels with the shard WHOLE, not filtered down to just
+  that shard's clients. It's tempting to want to scope it — "only send the
+  dedup entries for clients who've touched THIS shard" — but a client's
+  SeqNum is a single strictly-increasing counter across every key it ever
+  writes, regardless of shard, so there's no clean subset to compute without
+  tracking per-shard-per-client history nobody else needs. Sending the whole
+  table and merging by MAX per ClientID is safe (a client's dedup fact is
+  either irrelevant to the recipient's OWN shards, in which case it just sits
+  there unused, or relevant, in which case it's exactly right) and is what
+  real solutions to this exact problem do.
+- `migrationLoop` mirrors `configPollLoop`'s whole shape on purpose: leader-
+  only, fire-and-forget Propose, a local "already proposed, don't re-log
+  every tick" cache reset on losing leadership. The thing being proposed
+  (`Migrate`) doesn't even need dedup the way Put/Append do — merging the
+  same data or dedup entries twice is a no-op, so a lost-then-retried
+  proposal is free to just happen again. That asymmetry between "needs exact
+  ClientID/SeqNum dedup" (Put/Append) and "naturally idempotent, retry away"
+  (Config, Migrate) is really about whether the OPERATION has externally
+  observable side effects beyond its own state (a client waiting on a
+  specific reply) or not.
+- `Pull` doesn't require the donor to be leader, and answering from a
+  follower is genuinely safe, not just convenient: once a replica's own
+  applied config has passed the point where it stopped owning a shard, Day
+  4's own apply-time check already guarantees NOTHING can mutate that
+  shard's data on this replica ever again — the data is frozen, and every
+  replica reaches the identical frozen state via the identical log, whether
+  it happens to be leader or not. The harder question was a race I didn't
+  see until I sat down to write `Pull`'s docs: could a NEW owner start
+  pulling from a donor that hasn't yet itself caught up to the config
+  transition, catching some writes but not others still in flight? Yes —
+  which is exactly why `Pull` gates on `donor.cfg.Num >= args.ConfigNum`,
+  not on "donor currently believes it owns nothing here."
+- A second gate I only found by asking "what if the SAME shard gets
+  reassigned again before its first migration even lands?": B pulls shard S
+  from A, then — before B has actually finished that pull — the controller
+  reassigns S again, this time to C. If C asked B for the shard the instant
+  B's OWN config caught up to the reassignment, B would hand over whatever
+  it has, which might be nothing at all. `Pull` also refuses
+  (`GroupErrNotReady`) if the DONOR itself still has that shard in its own
+  `migrating` map. This is deliberately a safety fix, not a liveness one: it
+  stops corruption, but if B's own pull from A stalls forever, so does C's
+  from B. Rapid reassignment of a shard before earlier migrations settle is
+  explicitly not this day's problem to solve for real — TASKS.md's own Day 6
+  ("concurrent clients through reconfiguration") is where that kind of
+  pressure is meant to show up and get handled.
+- Mutation testing again found a gap invisible to my first pass, and it
+  rhymes with Day 4's: the migrating-gate itself (skip data migration
+  entirely) broke a whole test immediately, since every test writes data
+  before moving it and checks it's still there. But the dedup merge's `if
+  seq > existing` collapsed to a plain overwrite and passed EVERYTHING —
+  because every migration in every test landed a ClientID the recipient had
+  never independently seen before, so "take the max" and "just overwrite"
+  produced identical results every time. Only a test that pre-seeds the
+  RECIPIENT with a higher SeqNum before migrating in a stale, lower one for
+  the same client actually distinguishes the two. Same shape as Day 4's
+  gaps, again: the common path in every test I'd already written happened to
+  agree with a weaker, wrong implementation.
+- Still no garbage collection: the old owner of a migrated shard keeps its
+  copy forever, unused, unreachable through its own `Get`/`PutAppend` but
+  still sitting in `store`. TASKS.md names this explicitly as Day 6's own
+  "challenge" scope, not an oversight here — every migration currently
+  leaks a shard's worth of memory on whoever used to hold it.
+
 _(continue per day)_
 
 ## Reference material

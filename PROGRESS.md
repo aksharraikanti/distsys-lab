@@ -1,12 +1,12 @@
 # Progress
 
 Current stage: **05-sharded-kv**
-Current day: **Day 5 — Shard migration** (next up)
+Current day: **Day 6 — Concurrent clients through reconfiguration** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
-Stage 5 (Sharded KV store) scoped into 8 days, Days 1-4 complete.
+Stage 5 (Sharded KV store) scoped into 8 days, Days 1-5 complete.
 
 ## Log
 
@@ -488,4 +488,23 @@ Stage 5 (Sharded KV store) scoped into 8 days, Days 1-4 complete.
   20/20 clean stage runs and 3/3 clean full-suite runs under
   `GOMAXPROCS=2 -race` (one pre-existing, already-documented Stage 2 flake —
   `TestKVStoreConvergesAcrossCluster` — unrelated to this day, seen once).
+- 2026-09-29 — Stage 5 Day 5 (Shard migration) complete: adopting a Config
+  that grants a REAL shard (previous owner not 0, not me) marks it
+  `migrating` instead of ready; `migrationLoop` (leader-only) Pulls it and
+  Proposes a `Migrate` entry once data arrives, landing through the log so
+  every replica gets it identically. `Pull` answers only once the donor's
+  own applied config has caught up to the transition (data is provably
+  frozen by then) AND the donor isn't itself still migrating that shard in
+  — the second gate matters if a shard is reassigned again before its first
+  migration lands; without it a donor could hand off incomplete data. Whole
+  `duplicateTable` travels with every migration (a client's SeqNum sequence
+  isn't shard-scoped), merged by MAX per ClientID. Mutation testing found a
+  gap that rhymes with Day 4's: the dedup merge's `if seq > existing`
+  collapsed to a plain overwrite passed every existing test, since every
+  migration in every test landed a ClientID the recipient had never
+  independently seen — a dedicated test now pre-seeds a higher SeqNum on
+  the recipient before migrating in a stale, lower one for the same client.
+  No garbage collection yet (Day 6's own named "challenge" scope) — old
+  owners keep a moved shard's data forever, unused. 15/15 clean stage runs
+  and 3/3 clean full-suite runs under `GOMAXPROCS=2 -race`.
 
