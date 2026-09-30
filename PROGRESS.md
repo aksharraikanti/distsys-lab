@@ -1,12 +1,12 @@
 # Progress
 
 Current stage: **05-sharded-kv**
-Current day: **Day 6 — Concurrent clients through reconfiguration** (next up)
+Current day: **Day 7 — A history checker** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
-Stage 5 (Sharded KV store) scoped into 8 days, Days 1-5 complete.
+Stage 5 (Sharded KV store) scoped into 8 days, Days 1-6 complete.
 
 ## Log
 
@@ -507,4 +507,29 @@ Stage 5 (Sharded KV store) scoped into 8 days, Days 1-5 complete.
   No garbage collection yet (Day 6's own named "challenge" scope) — old
   owners keep a moved shard's data forever, unused. 15/15 clean stage runs
   and 3/3 clean full-suite runs under `GOMAXPROCS=2 -race`.
+- 2026-09-30 — Stage 5 Day 6 (Concurrent clients through reconfiguration)
+  complete, and with it the Day 6 "challenge": garbage collection. A Config
+  that COSTS a group a shard marks it `leaving` (mirroring Day 5's own
+  `migrating` on the gaining side, populated by the same code, one loop now
+  checking both directions); `gcLoop` confirms the new owner is genuinely
+  ready via a new `HasShard` RPC (itself just `ownsLocked`'s own check,
+  exposed) before Proposing a `GC` entry that drops the shard's keys —
+  through the log, so every replica agrees on when. Deliberately
+  conservative: a shard reassigned again before the FIRST recipient ever
+  confirms is a known, accepted leak (safe, not maximally live). Stress
+  test: 5 private-key clients Appending concurrently while the cluster
+  grows 1 group -> 3, two shards Move explicitly, and the original group
+  Leaves entirely, all mid-flight — every client's final value checked
+  against the exact concatenation of its own acknowledged writes, 15/15
+  clean, ~150ms each. One test-only bug found this way: sharing a single
+  `*CtrlerClerk` across concurrent client goroutines raced (it's documented
+  as unsafe for concurrent use, same as `ShardClerk`) — each client needed
+  its own. Mutation testing found the GC deletion itself caught
+  immediately, but mutating the `recipientReady` safety gate to always
+  return true was only flaky-caught by the integration test (real
+  goroutine-scheduling timing, not every run) — added a deterministic unit
+  test of the gate directly, generalizing Day 4's "test the authority, not
+  the common path" to: when the authority's failure is itself
+  timing-dependent, test the gate in isolation. 15/15 clean stage runs and
+  3/3 clean full-suite runs under `GOMAXPROCS=2 -race`.
 

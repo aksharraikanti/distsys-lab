@@ -2,6 +2,8 @@ package shardkv
 
 import (
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -336,6 +338,7 @@ func TestGroupServerGetRefusesBeforeOwnNoopApplied(t *testing.T) {
 		ctrl:           NewCtrlerClerk(ctrlers),
 		store:          make(map[string]string),
 		migrating:      make(map[int]int),
+		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
 		stopCh:         make(chan struct{}),
@@ -404,6 +407,7 @@ func TestGroupServerRejectsWriteThatArrivesAfterConfigRevokesOwnership(t *testin
 		ctrl:           NewCtrlerClerk(ctrlers),
 		store:          make(map[string]string),
 		migrating:      make(map[int]int),
+		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
 		stopCh:         make(chan struct{}),
@@ -484,6 +488,7 @@ func TestGroupServerRejectsOutOfOrderConfig(t *testing.T) {
 		ctrl:           NewCtrlerClerk(ctrlers),
 		store:          make(map[string]string),
 		migrating:      make(map[int]int),
+		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
 		stopCh:         make(chan struct{}),
@@ -613,6 +618,7 @@ func TestGroupServerRefusesShardUntilMigrationCompletes(t *testing.T) {
 		ctrl:           NewCtrlerClerk(ctrlers),
 		store:          make(map[string]string),
 		migrating:      make(map[int]int),
+		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
 		stopCh:         make(chan struct{}),
@@ -755,6 +761,7 @@ func TestGroupServerMigratedDedupNeverRegresses(t *testing.T) {
 		ctrl:           NewCtrlerClerk(ctrlers),
 		store:          make(map[string]string),
 		migrating:      make(map[int]int),
+		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
 		stopCh:         make(chan struct{}),
@@ -815,5 +822,180 @@ func TestGroupServerMigratedDedupNeverRegresses(t *testing.T) {
 	s.mu.Unlock()
 	if after != 5 {
 		t.Fatalf("a stale migrated dedup entry (SeqNum 3) must not regress duplicateTable[42]: got %d, want 5", after)
+	}
+}
+
+// TestGroupServerRecipientReadyGate unit-tests recipientReady (and,
+// through it, HasShard) directly: this is the SAFETY gate that stops gcLoop
+// from deleting a shard before the new owner genuinely has it. The full
+// end-to-end GC test below exercises the real protocol, but its timing
+// (migration and GC racing concurrently) can't reliably prove this specific
+// gate is what's doing the work — a broken gate that always says "ready"
+// only causes an observable failure on an unlucky interleaving, not every
+// run. This test makes the gate's own logic deterministic to check.
+func TestGroupServerRecipientReadyGate(t *testing.T) {
+	donor := &GroupServer{} // recipientReady only touches its arguments
+
+	notYetOwner := &GroupServer{gid: 2, cfg: Config{Num: 1}, migrating: make(map[int]int)}
+	if donor.recipientReady([]*GroupServer{notYetOwner}, 0) {
+		t.Fatal("recipientReady must be false when the recipient doesn't own the shard yet")
+	}
+
+	stillMigrating := &GroupServer{gid: 2, migrating: map[int]int{0: 1}}
+	stillMigrating.cfg.Shards[0] = 2
+	if donor.recipientReady([]*GroupServer{stillMigrating}, 0) {
+		t.Fatal("recipientReady must be false when the recipient owns the shard but is still migrating it in")
+	}
+
+	ready := &GroupServer{gid: 2, migrating: make(map[int]int)}
+	ready.cfg.Shards[0] = 2
+	if !donor.recipientReady([]*GroupServer{ready}, 0) {
+		t.Fatal("recipientReady must be true once the recipient owns the shard and isn't migrating it")
+	}
+}
+
+// TestGroupServerGarbageCollectsMigratedShard is Day 6's own named
+// "challenge": once a migrated shard's new owner is confirmed ready, the
+// OLD owner must actually drop its now-orphaned copy — real data flows
+// through the real Pull/Migrate/HasShard/GC protocol end to end here, no
+// shortcuts, checked directly against EVERY replica's own store (not just
+// the leader's) since GC is a log entry every replica applies identically.
+func TestGroupServerGarbageCollectsMigratedShard(t *testing.T) {
+	_, ctrlers, _, ctrlerCleanup := newTestCtrlerCluster(3)
+	defer ctrlerCleanup()
+	admin := NewCtrlerClerk(ctrlers)
+	admin.Join(map[int][]string{1: addrsFor(1), 2: addrsFor(2)})
+	cfg := admin.Query(-1)
+
+	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers)
+	defer g1Cleanup()
+	nodes2, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers)
+	defer g2Cleanup()
+	groups := map[int][]*GroupServer{1: g1, 2: g2}
+	wirePeers(groups)
+
+	ck := NewShardClerk(admin, groups)
+	key := shardOwnedByGroup(cfg, 1)
+	shard := Key2Shard(key)
+
+	waitForGroupConfig(t, g1[waitForGroupLeader(t, nodes1, 2*time.Second)], cfg.Num, 2*time.Second)
+	ck.Put(key, "gc-me")
+
+	admin.Move(shard, 2)
+	afterMove := admin.Query(-1)
+	waitForGroupConfig(t, g1[waitForGroupLeader(t, nodes1, 2*time.Second)], afterMove.Num, 3*time.Second)
+	waitForGroupConfig(t, g2[waitForGroupLeader(t, nodes2, 2*time.Second)], afterMove.Num, 3*time.Second)
+
+	// Confirm the new owner really has it first — makes the test's intent
+	// legible (the old owner isn't dropping the only copy) even though
+	// gcLoop verifies this itself via HasShard regardless.
+	waitFor(t, 3*time.Second, func() bool {
+		var reply GroupGetReply
+		err := g2[waitForGroupLeader(t, nodes2, 2*time.Second)].Get(&GroupGetArgs{Key: key}, &reply)
+		return err == nil && reply.Err == GroupOK && reply.Value == "gc-me"
+	})
+
+	// Every replica of the OLD owner must eventually drop the key AND clear
+	// its leaving bookkeeping — not just its current leader.
+	waitFor(t, 3*time.Second, func() bool {
+		for _, s := range g1 {
+			s.mu.Lock()
+			_, stillSet := s.store[key]
+			stillLeaving := len(s.leaving)
+			s.mu.Unlock()
+			if stillSet || stillLeaving != 0 {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// TestConcurrentClientsThroughReconfiguration is the invariant TASKS.md
+// names for this day: "every acknowledged write is visible, none lost, none
+// applied twice" — Stage 2 Day 5's own private-key-per-client trick, now
+// run while the cluster grows from 1 group to 3, shards get explicitly
+// Moved, and the original group Leaves entirely, all mid-flight. Each
+// simulated client Appends a unique marker per call to a key only IT ever
+// writes; if the final value isn't exactly the concatenation of every
+// marker this client saw acknowledged, in order, something was lost,
+// duplicated, or reordered somewhere underneath — which migration, GC, and
+// reconfiguration all touch at once here.
+func TestConcurrentClientsThroughReconfiguration(t *testing.T) {
+	_, ctrlers, _, ctrlerCleanup := newTestCtrlerCluster(3)
+	defer ctrlerCleanup()
+	admin := NewCtrlerClerk(ctrlers)
+
+	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers)
+	defer g1Cleanup()
+	_, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers)
+	defer g2Cleanup()
+	_, g3, _, g3Cleanup := newTestGroupCluster(3, 3, ctrlers)
+	defer g3Cleanup()
+	groups := map[int][]*GroupServer{1: g1, 2: g2, 3: g3}
+	wirePeers(groups) // groups 2 and 3 aren't in any config yet — harmless
+
+	admin.Join(map[int][]string{1: addrsFor(1)})
+	waitForGroupConfig(t, g1[waitForGroupLeader(t, nodes1, 2*time.Second)], 1, 2*time.Second)
+
+	const numClients = 5
+	const opsPerClient = 30
+
+	acked := make([][]string, numClients)
+	var wg sync.WaitGroup
+	for i := 0; i < numClients; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Each simulated client gets its OWN CtrlerClerk, not the
+			// shared admin one — CtrlerClerk (like ShardClerk) is
+			// documented as unsafe for concurrent use, and admin is
+			// already being driven concurrently by the reconfiguration
+			// goroutine below.
+			ck := NewShardClerk(NewCtrlerClerk(ctrlers), groups)
+			key := fmt.Sprintf("client-%d", i)
+			var own []string
+			for j := 0; j < opsPerClient; j++ {
+				marker := fmt.Sprintf("[%d-%d]", i, j)
+				ck.Append(key, marker)
+				own = append(own, marker)
+			}
+			acked[i] = own
+		}(i)
+	}
+
+	// Reconfigure WHILE clients are hammering keys: grow from 1 group to 3,
+	// explicitly Move a couple of shards, then remove the ORIGINAL group
+	// entirely, forcing real migrations to fire during live traffic rather
+	// than waiting for a quiet moment.
+	go func() {
+		time.Sleep(3 * time.Millisecond)
+		admin.Join(map[int][]string{2: addrsFor(2), 3: addrsFor(3)})
+		time.Sleep(5 * time.Millisecond)
+		admin.Move(0, 2)
+		admin.Move(NShards-1, 3)
+		time.Sleep(5 * time.Millisecond)
+		admin.Leave([]int{1})
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("clients never finished through reconfiguration")
+	}
+
+	verifyCk := NewShardClerk(NewCtrlerClerk(ctrlers), groups)
+	for i := 0; i < numClients; i++ {
+		key := fmt.Sprintf("client-%d", i)
+		want := strings.Join(acked[i], "")
+		got := verifyCk.Get(key)
+		if got != want {
+			t.Fatalf("client %d: final value has length %d, want %d (every acknowledged write must be visible exactly once, in order)", i, len(got), len(want))
+		}
 	}
 }

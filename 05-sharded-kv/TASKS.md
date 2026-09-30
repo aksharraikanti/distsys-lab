@@ -125,12 +125,30 @@ correct while its shard moves.
       in a stale, lower one for the same client, and checks it doesn't
       regress. No garbage collection yet (Day 6's explicit "challenge"
       scope) — the old owner keeps a moved shard's data forever, unused.
-- [ ] **Day 6 — Concurrent clients through reconfiguration.** Many clients
+- [x] **Day 6 — Concurrent clients through reconfiguration.** Many clients
       hammering keys while groups join and leave. The invariant is Stage 2's,
       now with data moving underneath: every acknowledged write is visible,
       none lost, none applied twice. Includes garbage-collecting a shard from
       its old owner once the new owner has it (the "challenge" exercise —
       without it, every migration leaks the shard forever).
+      GC: a Config that COSTS a group a shard marks it `leaving` (mirroring
+      `migrating` on the gaining side); `gcLoop` confirms the new owner is
+      actually ready (`HasShard`, itself gated identically to `ownsLocked`)
+      before Proposing a `GC` entry that drops the shard's keys — through
+      the log, so every replica agrees on exactly when. Deliberately
+      conservative: a shard reassigned again before the FIRST recipient ever
+      confirms is a known, accepted leak (safe, just not maximally live —
+      this day closes the common case, not arbitrary reassignment chains).
+      Stress test: 5 private-key clients Appending concurrently while the
+      cluster grows 1 group -> 3, two shards Move explicitly, and the
+      original group Leaves entirely, all mid-flight; every client's final
+      value is checked against the exact concatenation of its own
+      acknowledged writes. 15/15 clean, ~150ms each. A mutation
+      (`recipientReady` always "true") was only flaky-caught by the
+      integration test (some runs passed) — added a deterministic unit test
+      of the gate itself, the same "test the authority, not the common
+      path" lesson from Day 4, now generalized to "a real bug can be timing
+      -dependent to observe; test the gate directly when it can be."
 - [ ] **Day 7 — A history checker.** The private-key-per-client trick every
       test so far uses cannot detect cross-client anomalies, and sharding
       creates new ones. Record every operation's `(invoke time, return time,

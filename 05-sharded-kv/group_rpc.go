@@ -63,3 +63,16 @@ type PullReply struct {
 	Data     map[string]string
 	DupTable map[int64]int64
 }
+
+// HasShardArgs asks a group whether IT is fully ready to serve a shard —
+// the OLD owner's half of garbage collection: before it deletes a shard it
+// gave away, it needs to know the new owner genuinely has it, not just that
+// a config transition happened. See GroupServer.HasShard's doc comment.
+type HasShardArgs struct {
+	Shard int
+}
+
+type HasShardReply struct {
+	Err   GroupErr
+	Ready bool
+}
