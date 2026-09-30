@@ -297,6 +297,66 @@ _(fill this in as you learn — one section per day, in your own words.)_
   "challenge" scope, not an oversight here — every migration currently
   leaks a shard's worth of memory on whoever used to hold it.
 
+### Day 6 — Concurrent clients through reconfiguration
+- Garbage collection is Day 5's own `migrating` field mirrored: `leaving`
+  tracks shards THIS group gave away, populated at the exact same moment
+  (and by the exact same Config-apply code) as `migrating` is — one loop
+  over all `NShards` now checks both directions (gained from someone real,
+  lost to someone real) instead of just one. Once a design has "the log is
+  the only writer of this state" as a working pattern, the second use of it
+  is mostly just recognizing the shape again, not inventing something new.
+- The donor doesn't just trust that a config transition happened — it asks
+  the recipient directly (`HasShard`) whether it's actually ready, and only
+  then Proposes the deletion to its OWN log. That asking-first structure is
+  what makes this safe rather than merely probable: without it, GC would be
+  racing migration with nothing enforcing who wins.
+- `HasShard` needed no new machinery at all — it's `ownsLocked`'s own check
+  (cfg says so, and not still migrating), read out through an RPC instead of
+  used internally. Worth noticing when a new public interface is really
+  just exposing something a private one already computes.
+- I originally reasoned "gcLoop always asks the CURRENT `leaving` entry, so
+  it naturally follows a shard through a chain of reassignments" — wrong,
+  and I caught it by actually tracing what happens to `leaving[shard]` when
+  a THIRD group takes the shard from the second before the donor's asked
+  anyone anything. `leaving[shard]` is written only by THIS group's own
+  Config-apply step, which stops firing for that shard the instant this
+  group gives it away — so it keeps the ORIGINAL recipient's identity
+  forever, never learns the shard moved again. Safe (this group just keeps
+  an orphaned copy rather than corrupting anything), not fully live for a
+  fast reassignment chain — an explicit, accepted scope boundary, not a bug
+  I'm pretending isn't there.
+- Mutation-checked the GC deletion itself (caught immediately — the
+  dedicated GC test fails within its 3s wait, since nothing ever clears the
+  old owner's copy). The safety GATE (`recipientReady`) was a different
+  story: mutating it to unconditionally return true was only caught by the
+  full end-to-end GC test on SOME runs, not every one — the actual race
+  between "migration lands" and "GC fires early" depends on real goroutine
+  scheduling, so a test built on real timing can't promise to observe it
+  every time. Wrote a direct, deterministic unit test of `recipientReady`
+  instead (three hand-built recipients: not-yet-owner, still-migrating,
+  actually-ready), which fails every single time the gate is broken. Same
+  root lesson as Day 4's "test the authority, not the common path" —
+  extended: when the authority's failure mode is itself timing-dependent,
+  the deterministic version of that lesson is to unit-test the gate in
+  isolation, not just lean harder on the integration test.
+- The concurrent stress test is Stage 2 Day 5's private-key trick again,
+  now with the ground moving: 5 clients Appending to their own keys while
+  the cluster grows from 1 group to 3, two shards Move explicitly, and the
+  original group Leaves — all overlapping real client traffic, not run
+  before or after it. `ShardClerk`'s retry-on-`GroupErrWrongGroup` is
+  doing real work here: every client keeps writing successfully straight
+  through several shards changing owners underneath it, without ever
+  knowing a migration happened. The one bug this surfaced was in the TEST,
+  not production: sharing a single `*CtrlerClerk` across the concurrent
+  client goroutines raced (it's explicitly documented as not safe for
+  concurrent use, same as `ShardClerk` itself) — each simulated client
+  needed its own, exactly the one-Clerk-per-actor rule this project has
+  followed since Stage 2's own `Clerk`.
+- No timeouts anywhere in this stack still means what it's meant since
+  Stage 2: `ShardClerk` waits, it doesn't give up. The stress test's 30s
+  outer bound is a test-harness safety net against a real bug hanging
+  forever, not a production timeout — the actual runs finish in ~150ms.
+
 _(continue per day)_
 
 ## Reference material

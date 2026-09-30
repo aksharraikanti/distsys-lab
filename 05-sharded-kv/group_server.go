@@ -20,6 +20,7 @@ const (
 	groupLeaderCheckInterval   = raft.HeartbeatInterval
 	groupConfigPollInterval    = raft.HeartbeatInterval
 	groupMigrationPollInterval = raft.HeartbeatInterval
+	groupGCPollInterval        = raft.HeartbeatInterval
 )
 
 // groupApplyResult is what applyLoop hands back to a waiting PutAppend
@@ -68,6 +69,15 @@ type GroupServer struct {
 	// that successfully lands the pulled data removes it.
 	migrating map[int]int
 
+	// leaving[shard] is the group id this replica gave shard away TO,
+	// present only for a shard this group used to own but doesn't anymore,
+	// that hasn't been garbage-collected yet — migrating's mirror image.
+	// gcLoop confirms the new owner actually has it (HasShard) before
+	// Proposing a GC entry that deletes the shard's data and clears this
+	// entry. Without it, Day 5's migration leaks every shard it ever gives
+	// away forever (TASKS.md's own "challenge" framing for this day).
+	leaving map[int]int
+
 	// peers resolves another group's id to its own replica set, for
 	// migrationLoop's Pull calls. In-process, the same scoping choice (and
 	// the same reason) CtrlerClerk/ShardClerk already made: proving the
@@ -98,6 +108,7 @@ func NewGroupServer(rf *raft.Raft, gid int, ctrl *CtrlerClerk) *GroupServer {
 		ctrl:           ctrl,
 		store:          make(map[string]string),
 		migrating:      make(map[int]int),
+		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
 		stopCh:         make(chan struct{}),
@@ -106,6 +117,7 @@ func NewGroupServer(rf *raft.Raft, gid int, ctrl *CtrlerClerk) *GroupServer {
 	go s.noopLoop()
 	go s.configPollLoop()
 	go s.migrationLoop()
+	go s.gcLoop()
 	return s
 }
 
@@ -168,7 +180,9 @@ func (s *GroupServer) ownsLocked(key string) bool {
 // predecessor, i.e. whatever s.cfg was a moment ago, captured before this
 // line overwrites it) is recorded so migrationLoop knows who to Pull from —
 // captured NOW because s.cfg is about to be overwritten, and nothing else
-// remembers what it used to be.
+// remembers what it used to be. Symmetrically, a Config that COSTS this
+// group a shard it used to own adds an entry to leaving, so gcLoop knows
+// which group to ask "do you actually have it yet" before deleting.
 //
 // A Migrate entry lands one shard's pulled data: merge its key/value pairs
 // into store, merge its dedup entries into duplicateTable by taking the
@@ -177,6 +191,16 @@ func (s *GroupServer) ownsLocked(key string) bool {
 // not a fresher source of truth), then clear the migrating entry. Both
 // merges are idempotent, so a duplicate or re-proposed Migrate for a shard
 // that's already landed is silently a no-op, not an error.
+//
+// A GC entry drops one shard's data — every key whose Key2Shard matches —
+// but ONLY if the shard is still in leaving; a GC entry that arrives after
+// the shard has somehow already been cleared (a duplicate proposal, or this
+// same shard coming back around through a LATER reassignment — see gcLoop's
+// own doc comment) is a no-op, not a second deletion of who-knows-what.
+// duplicateTable is deliberately untouched: it isn't scoped per shard (see
+// Migrate's own reasoning), so there's no safe per-shard subset of it to
+// remove without risking a regression on a DIFFERENT shard this group still
+// owns.
 func (s *GroupServer) applyLoop() {
 	for {
 		var msg raft.ApplyMsg
@@ -201,15 +225,14 @@ func (s *GroupServer) applyLoop() {
 			if op.Config.Num == s.cfg.Num+1 {
 				old := s.cfg
 				s.cfg = op.Config
-				for shard, newOwner := range op.Config.Shards {
-					if newOwner != s.gid {
-						continue
+				for shard := 0; shard < NShards; shard++ {
+					oldOwner, newOwner := old.Shards[shard], op.Config.Shards[shard]
+					if newOwner == s.gid && oldOwner != s.gid && oldOwner != 0 {
+						s.migrating[shard] = oldOwner
 					}
-					prevOwner := old.Shards[shard]
-					if prevOwner == s.gid || prevOwner == 0 {
-						continue // already owned it, or nobody ever did
+					if oldOwner == s.gid && newOwner != s.gid && newOwner != 0 {
+						s.leaving[shard] = newOwner
 					}
-					s.migrating[shard] = prevOwner
 				}
 			}
 			result.err = GroupOK
@@ -224,6 +247,16 @@ func (s *GroupServer) applyLoop() {
 					}
 				}
 				delete(s.migrating, op.Shard)
+			}
+			result.err = GroupOK
+		case "GC":
+			if _, stillLeaving := s.leaving[op.Shard]; stillLeaving {
+				for k := range s.store {
+					if Key2Shard(k) == op.Shard {
+						delete(s.store, k)
+					}
+				}
+				delete(s.leaving, op.Shard)
 			}
 			result.err = GroupOK
 		case "Put", "Append":
@@ -404,6 +437,81 @@ func (s *GroupServer) pullFrom(donors []*GroupServer, shard, configNum int) (Pul
 	return PullReply{}, false
 }
 
+// gcLoop is migrationLoop's mirror image on the giving-away side: once per
+// tick, a leader checks for any shard still in leaving, asks the new owner
+// (via HasShard) whether it's actually ready yet, and Proposes a GC entry
+// once it is. Fire-and-forget for the identical reason migrationLoop's
+// Migrate Propose is: GC is idempotent (see applyLoop), so a lost proposal
+// just gets retried next tick.
+//
+// This is deliberately conservative, not maximally prompt: if the recipient
+// named in leaving[shard] never confirms (its own migrationLoop is stuck, it
+// crashed for good, or — a real, accepted gap — the shard was reassigned
+// AGAIN before it ever got the chance), this group just keeps the shard's
+// data forever rather than risk deleting the only other copy while it might
+// not actually be usable yet. leaving[shard] itself is only ever set by
+// THIS group's own Config transitions (applyLoop), so once this group gives
+// a shard away, it stops tracking where the shard goes next — it keeps
+// asking the ORIGINAL recipient, never learns of a later hand-off further
+// down the chain, and never collects if that recipient also moves the shard
+// on before confirming. Safe (never deletes early), not maximally live —
+// TASKS.md's own Day 6 framing is "without it, every migration leaks the
+// shard forever," and this closes the common case without claiming to
+// solve arbitrary reassignment chains in one day.
+func (s *GroupServer) gcLoop() {
+	ticker := time.NewTicker(groupGCPollInterval)
+	defer ticker.Stop()
+
+	proposed := make(map[int]bool)
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			if s.rf.State() != raft.Leader {
+				proposed = make(map[int]bool)
+				continue
+			}
+			s.mu.Lock()
+			pending := make(map[int]int, len(s.leaving))
+			for shard, to := range s.leaving {
+				pending[shard] = to
+			}
+			peers := s.peers
+			s.mu.Unlock()
+
+			for shard, toGID := range pending {
+				if proposed[shard] {
+					continue
+				}
+				if !s.recipientReady(peers[toGID], shard) {
+					continue
+				}
+				if _, _, isLeader := s.rf.Propose(groupOp{Type: "GC", Shard: shard}); isLeader {
+					proposed[shard] = true
+				}
+			}
+		}
+	}
+}
+
+// recipientReady asks each replica of the new owner in turn (round-robin-
+// until-success, same shape as pullFrom) whether it's fully ready to serve
+// shard — true only once some replica actually confirms it.
+func (s *GroupServer) recipientReady(recipients []*GroupServer, shard int) bool {
+	args := &HasShardArgs{Shard: shard}
+	for _, r := range recipients {
+		var reply HasShardReply
+		if err := r.HasShard(args, &reply); err != nil {
+			continue
+		}
+		if reply.Err == GroupOK && reply.Ready {
+			return true
+		}
+	}
+	return false
+}
+
 // proposeAndWait is Ctrler's own proposeAndWait, adapted to groupOp/
 // groupApplyResult: the supersession check still compares ClientID/SeqNum
 // rather than the whole op (groupOp carries a Config field, not
@@ -546,6 +654,22 @@ func (s *GroupServer) Pull(args *PullArgs, reply *PullReply) error {
 
 	reply.Data = data
 	reply.DupTable = dup
+	reply.Err = GroupOK
+	return nil
+}
+
+// HasShard answers the old owner's gcLoop: is THIS group actually ready to
+// serve shard (owns it per cfg AND isn't still migrating it in)? Not gated
+// by leader-and-noop the way Get is, for the same reason Pull isn't — the
+// fact "this replica considers itself ready" is exactly ownsLocked's own
+// check, and it's already only ever true once the identical guarantee
+// Get's gate exists to provide already holds, via cfg/migrating themselves
+// only ever advancing through the committed log.
+func (s *GroupServer) HasShard(args *HasShardArgs, reply *HasShardReply) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, stillMigrating := s.migrating[args.Shard]
+	reply.Ready = s.cfg.Shards[args.Shard] == s.gid && !stillMigrating
 	reply.Err = GroupOK
 	return nil
 }
