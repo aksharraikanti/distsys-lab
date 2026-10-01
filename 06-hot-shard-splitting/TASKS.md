@@ -39,7 +39,7 @@ splitting a shard and reassigning a shard are the same kind of event
 (a configuration change that moves data) once the ring makes "shard" a range
 instead of a fixed bucket.
 
-- [ ] **Day 1 — Consistent hashing ring (pure logic).** Replace `Key2Shard`'s
+- [x] **Day 1 — Consistent hashing ring (pure logic).** Replace `Key2Shard`'s
       fixed `hash(key) % NShards` with a ring: a shard is identified by a
       `[Start, End)` range of hash space, not a bucket number, and a `Ring`
       type (replacing `Config.Shards [NShards]int`) maps ranges to group ids.
@@ -48,6 +48,27 @@ instead of a fixed bucket.
       with no gaps and no overlaps, and splitting a range (Day 4) never
       changes which shard any key OUTSIDE that range belongs to — the
       property Stage 5's fixed `NShards` scheme couldn't offer.
+      Built as `ShardID` (a stable identity surviving a future Move, the way
+      Stage 5's shard index never could once shards can be created) +
+      `RingEntry{Start, Shard}` + `Ring{Entries []RingEntry}`, kept sorted
+      ascending by Start so `RingAssign` is a binary search — "ring," not
+      "line," because a hash BELOW every stored Start wraps to the entry
+      with the HIGHEST Start, the same stretch of space it already owns.
+      `Split` is self-validating (no replicated boundary built yet to do
+      that for it, unlike Stage 5's Join/Leave/Move) and property-verified:
+      a key outside the split shard's range keeps its exact owner, one
+      inside lands on whichever of the two new halves actually contains it,
+      never anything else. Didn't carry ownership (shard -> group) in `Ring`
+      at all — that's a deliberately separate concern, reused from Stage 5's
+      own Config once a later day wires this into something replicated.
+      Mutation testing found two real gaps: `inRangeExclusive`'s wrap branch
+      removed broke the boundary-partition property test immediately, but
+      `RingAssign`'s own wrap fallback (`Entries[n-1]` vs `Entries[0]`) was
+      UNREACHABLE through every test that built rings via `NewRing`, since
+      `NewRing` always starts its first entry at exactly 0 — no key's hash
+      can ever be "below" that. Refactored `RingAssign` to delegate to an
+      internal `ringAssignPoint`, testable against hand-picked boundary
+      values a hand-built (non-`NewRing`) ring can actually exercise.
 - [ ] **Day 2 — Per-shard load tracking.** Each `GroupServer` counts
       requests per shard it owns (a lightweight counter, reset on read — no
       need for anything fancier than Stage 4's own `Stats` pattern), exposed
