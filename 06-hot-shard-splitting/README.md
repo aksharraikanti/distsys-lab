@@ -69,6 +69,46 @@ _(fill this in as you learn — one section per day, in your own words.)_
   sometimes the "common path" isn't just the likely one, it's the ONLY one
   your own constructors can ever produce.
 
+### Day 2 — Per-shard load tracking
+- The real decision this day was scoping it SMALLER than the TASKS.md
+  bullet literally asked for, not building what it asked for. "Each
+  `GroupServer` counts requests" names a specific, already-shipped Stage 5
+  type — but `GroupServer` was built around a fixed `NShards` array, has no
+  idea what a `Ring` or a `ShardID` is, and changing that is exactly the
+  kind of structural decision Day 4 (actually wiring splitting in) should
+  make on purpose, with the full picture of what's being built, not
+  something that rides in quietly on a day whose own headline is "add a
+  counter." Building `LoadTracker` as standalone, server-agnostic
+  machinery — then proving it correct entirely on its own — means Day 4
+  inherits a piece that already works, instead of inheriting a
+  half-considered change bolted onto a server that was never designed for
+  it.
+- Reset-on-read turned out to be a genuinely good fit, not just the
+  "simplest thing that could work" TASKS.md named it as. It needs no clock,
+  no ticker goroutine, no separate "when did this window start" state — the
+  window IS whatever time elapsed between two `Snapshot` calls, decided
+  entirely by whoever's calling it. The cost is that the caller's own
+  POLLING cadence becomes the comparison's granularity; Day 3's detector
+  gets to decide how often "recently" means, which is actually the right
+  place for that decision to live, not baked into the tracker itself.
+- The one genuinely interesting design question was almost invisible:
+  should `Snapshot()` return a DEFENSIVE COPY of the counts, or can it hand
+  back the live map directly? Handing back the live map is only safe
+  because the very next line replaces `lt.counts` with a brand new map
+  under the same lock — by the time `Snapshot` returns, nothing inside the
+  tracker holds a reference to the map it just gave away anymore. It's a
+  full ownership transfer, not a shared view, so there's nothing left to
+  race on. Worth noticing because the EASY version of this code (copy
+  defensively, always) would have worked too, just done strictly more
+  copying for no actual safety gained.
+- Mutation testing caught the one thing actually worth checking here:
+  deleting the reset (`Snapshot` returning without replacing `lt.counts`)
+  broke the reset-semantics test immediately — a second `Snapshot` with no
+  new traffic in between would otherwise just keep re-reporting the same
+  old counts forever, silently turning "how busy right now" into "how busy
+  ever," which is a correctness bug a hot-shard detector built on top of it
+  would never be able to tell apart from a genuinely still-hot shard.
+
 _(continue per day)_
 
 ## Reference material

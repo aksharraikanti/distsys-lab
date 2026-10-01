@@ -1,13 +1,13 @@
 # Progress
 
 Current stage: **06-hot-shard-splitting**
-Current day: **Day 2 — Per-shard load tracking** (next up)
+Current day: **Day 3 — Hot shard detection** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
 Stage 5 (Sharded KV store) complete, all 8 days.
-Stage 6 (Hot shard detection and splitting) scoped into 6 days, Day 1 complete.
+Stage 6 (Hot shard detection and splitting) scoped into 6 days, Days 1-2 complete.
 
 ## Log
 
@@ -643,4 +643,17 @@ Stage 6 (Hot shard detection and splitting) scoped into 6 days, Day 1 complete.
   left alone — it targets a named lagging follower, not the leader.
   Reran both affected tests 10x under `-race`: clean. Full
   `go test ./... -race` across the repo: clean.
+- 2026-10-01 — Stage 6 Day 2 (Per-shard load tracking) complete:
+  `LoadTracker` — per-`ShardID` counters, `Record`/`Snapshot`
+  (reset-on-read) — built as standalone, server-agnostic machinery rather
+  than wired into Stage 5's `GroupServer` as the TASKS.md bullet literally
+  named: that server is a finished, shipped type built around a fixed
+  `NShards`, and bolting a dynamic-shard counter onto it is a structural
+  decision Day 4 (real splitting) should make deliberately, not something
+  that rides in on a "just add a counter" day. `Snapshot` hands back the
+  live counts map directly rather than a defensive copy — safe because the
+  same locked call immediately replaces it with a fresh map, a full
+  ownership transfer with nothing left to race on. Mutation-checked:
+  deleting the reset was caught immediately by the reset-semantics test.
+  20/20 clean stage runs and a full clean `go test ./... -race`.
 

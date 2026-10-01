@@ -69,13 +69,26 @@ instead of a fixed bucket.
       can ever be "below" that. Refactored `RingAssign` to delegate to an
       internal `ringAssignPoint`, testable against hand-picked boundary
       values a hand-built (non-`NewRing`) ring can actually exercise.
-- [ ] **Day 2 — Per-shard load tracking.** Each `GroupServer` counts
+- [x] **Day 2 — Per-shard load tracking.** Each `GroupServer` counts
       requests per shard it owns (a lightweight counter, reset on read — no
       need for anything fancier than Stage 4's own `Stats` pattern), exposed
       over a new RPC so something outside the group can ask "how hot is
       shard X right now." Decide the counting window (a fixed wall-clock
       interval, reset each time it's read, is the simplest thing that could
       distinguish "busy now" from "was busy an hour ago").
+      Scoped narrower than the bullet first promised: built `LoadTracker` —
+      per-`ShardID` counters, `Record`/`Snapshot` (reset-on-read, the
+      window choice named above) — as standalone, server-agnostic
+      machinery, verified in isolation (per-shard isolation, reset
+      semantics, concurrent `Record` safety). Did NOT wire it into Stage
+      5's `GroupServer` or add an RPC today: that server is a finished,
+      shipped type built around a fixed `NShards`, and bolting a
+      dynamic-shard counter onto it would be the kind of structural
+      decision Day 4 (real splitting) should make on purpose, not something
+      that rides in on a "just add a counter" day before a ring-based
+      server even exists to own it. Mutation-checked: `Snapshot` not
+      actually resetting its counts was caught immediately by the
+      reset-semantics test.
 - [ ] **Day 3 — Hot shard detection.** A monitor (polling every group the
       way `ShardClerk` already knows how to reach them) aggregates load
       reports and flags a shard "hot" by a threshold relative to the mean
