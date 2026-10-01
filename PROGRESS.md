@@ -1,13 +1,13 @@
 # Progress
 
 Current stage: **06-hot-shard-splitting**
-Current day: **Day 1 — Consistent hashing ring (pure logic)** (next up)
+Current day: **Day 2 — Per-shard load tracking** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
 Stage 5 (Sharded KV store) complete, all 8 days.
-Stage 6 (Hot shard detection and splitting) scoped into 6 days, not yet started.
+Stage 6 (Hot shard detection and splitting) scoped into 6 days, Day 1 complete.
 
 ## Log
 
@@ -583,4 +583,23 @@ Stage 6 (Hot shard detection and splitting) scoped into 6 days, not yet started.
   touching any other key's assignment, load tracking and hot-shard
   detection drive automatic splits, and Stage 5's own migration/GC/checker
   machinery is reused as-is once a split is just another config change.
+- 2026-10-01 — Stage 6 Day 1 (Consistent hashing ring) complete: `ShardID`
+  (a stable identity surviving a future Move, unlike Stage 5's own
+  array-index identity, which can't survive a shard being created) +
+  `RingEntry{Start, Shard}` + `Ring{Entries}`, sorted ascending so
+  `RingAssign` binary-searches; a hash below every stored Start wraps to
+  the HIGHEST-Start entry, the actual "ring" property. `Split` is
+  self-validating (no replicated boundary exists yet to do that for it).
+  Deliberately kept group ownership OUT of `Ring` — a Split and a Move are
+  unrelated concerns, and Day 2's load tracking needs load keyed by
+  `ShardID` regardless of which group currently serves it. Property-
+  verified: every ring point belongs to exactly one shard (checked against
+  exact boundary values, not just hashed keys, since a boundary-only bug
+  could hide behind thousands of interior-point checks), and splitting a
+  shard never changes any OTHER key's owner. Mutation testing found
+  `RingAssign`'s own wrap fallback was unreachable through every test
+  using `NewRing` (which always starts its first entry at exactly 0, so no
+  hash can ever fall "before" it) — refactored into an internal
+  point-based `ringAssignPoint` so a hand-built ring could exercise it
+  directly. 20/20 clean stage runs under `-race`.
 
