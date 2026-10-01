@@ -1,12 +1,13 @@
 # Progress
 
-Current stage: **05-sharded-kv**
-Current day: **Day 8 — Full integration** (next up)
+Current stage: **06-hot-shard-splitting**
+Current day: **Day 1 — Consistent hashing ring (pure logic)** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
-Stage 5 (Sharded KV store) scoped into 8 days, Days 1-7 complete.
+Stage 5 (Sharded KV store) complete, all 8 days.
+Stage 6 (Hot shard detection and splitting) scoped into 6 days, not yet started.
 
 ## Log
 
@@ -550,4 +551,36 @@ Stage 5 (Sharded KV store) scoped into 8 days, Days 1-7 complete.
   demonstration that Days 1-6's design holds up under the one anomaly
   class the private-key trick was structurally blind to. 15/15 clean stage
   runs and 3/3 clean full-suite runs under `GOMAXPROCS=2 -race`.
+- 2026-10-01 — Stage 5 Day 8 (Full integration) complete, and with it,
+  **Stage 5 is done**. Added real snapshotting to `GroupServer` (`Cfg`/
+  `Migrating`/`Leaving` alongside `KVServer`'s own `Store`/`DuplicateTable`
+  pattern) — the one mechanism this stage never needed until a day combined
+  long-running traffic with everything else. One combined stress test: 4
+  clients on 3 shared keys, live reconfiguration, 6 repeated crash/restart
+  rounds across 3 groups, real snapshotting (low `maxRaftState`), judged by
+  `IsLinearizable` — passes. A dedicated snapshot test forces a follower to
+  catch up via `InstallSnapshot` after missing a REAL reconfiguration
+  during its outage, not just writes — "leave cfg/leaving untouched" and
+  "correctly restore them" are indistinguishable unless something actually
+  changed while disconnected, confirmed by mutation testing a first,
+  weaker version of the test that didn't notice `s.cfg = snap.Cfg` deleted
+  outright. A dedicated "honest gap" test reproduces Stage 2's long-flagged
+  stale-partitioned-leader `Get` directly and proves Day 7's checker flags
+  the resulting history as non-linearizable — closing the loop between the
+  two tools this stage built. Found, while building that test, that
+  `FakeTransport.Unregister` alone does not isolate a LEADER (verified
+  empirically): it only blocks incoming calls, not the leader's own
+  outgoing replication, so a leader "cut off" this way keeps committing
+  normally. `Partition`/`Heal` is the correct primitive — used in the
+  honest-gap test (15/15 clean reproductions) — and this likely means
+  several EARLIER leader-cutoff tests in this stage (Day 3, Day 4) have
+  been passing without genuinely forcing the leadership change they claim;
+  flagged as a follow-up task rather than fixed today. 15/15 clean stage
+  runs and 3/3 clean full-suite runs under `GOMAXPROCS=2 -race`. Stage 6
+  (Hot shard detection and splitting) scoped into 6 days
+  (`06-hot-shard-splitting/TASKS.md`): a consistent-hashing ring replaces
+  Stage 5's fixed `NShards` buckets so a shard can split into two without
+  touching any other key's assignment, load tracking and hot-shard
+  detection drive automatic splits, and Stage 5's own migration/GC/checker
+  machinery is reused as-is once a split is just another config change.
 

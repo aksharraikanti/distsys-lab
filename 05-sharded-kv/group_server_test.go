@@ -16,7 +16,7 @@ import (
 // comment), and every replica's configPollLoop can call Query the moment it
 // becomes leader, so sharing one Clerk across replicas (or across groups)
 // would violate that contract even though it would often happen to work.
-func newTestGroupCluster(n, gid int, ctrlers []*Ctrler) (nodes map[int]*raft.Raft, servers []*GroupServer, transport *raft.FakeTransport, cleanup func()) {
+func newTestGroupCluster(n, gid int, ctrlers []*Ctrler, maxRaftState int) (nodes map[int]*raft.Raft, servers []*GroupServer, transport *raft.FakeTransport, cleanup func()) {
 	transport = raft.NewFakeTransport()
 	ids := make([]int, n)
 	for i := range ids {
@@ -28,7 +28,7 @@ func newTestGroupCluster(n, gid int, ctrlers []*Ctrler) (nodes map[int]*raft.Raf
 		rf := raft.NewRaft(id, otherPeers(ids, id), transport)
 		nodes[id] = rf
 		transport.Register(id, rf)
-		servers[id] = NewGroupServer(rf, gid, NewCtrlerClerk(ctrlers))
+		servers[id] = NewGroupServer(rf, gid, NewCtrlerClerk(ctrlers), maxRaftState)
 	}
 	for _, rf := range nodes {
 		go rf.RunElectionTimer()
@@ -132,9 +132,9 @@ func TestGroupServerRoundTripAndCrossGroupRefusal(t *testing.T) {
 	admin.Join(map[int][]string{1: addrsFor(1), 2: addrsFor(2)})
 	cfg := admin.Query(-1)
 
-	_, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers)
+	_, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers, -1)
 	defer g1Cleanup()
-	_, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers)
+	_, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers, -1)
 	defer g2Cleanup()
 
 	ck := NewShardClerk(admin, map[int][]*GroupServer{1: g1, 2: g2})
@@ -171,7 +171,7 @@ func TestGroupServerRetriedPutAppendAppliesOnlyOnce(t *testing.T) {
 	admin.Join(map[int][]string{1: addrsFor(1)})
 	cfg := admin.Query(-1)
 
-	nodes, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers)
+	nodes, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers, -1)
 	defer g1Cleanup()
 	leaderID := waitForGroupLeader(t, nodes, 2*time.Second)
 	leader := g1[leaderID]
@@ -210,9 +210,9 @@ func TestGroupServerMoveMigratesDataAndShardClerkFollows(t *testing.T) {
 	admin.Join(map[int][]string{1: addrsFor(1), 2: addrsFor(2)})
 	cfg := admin.Query(-1)
 
-	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers)
+	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers, -1)
 	defer g1Cleanup()
-	nodes2, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers)
+	nodes2, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers, -1)
 	defer g2Cleanup()
 	groups := map[int][]*GroupServer{1: g1, 2: g2}
 	wirePeers(groups)
@@ -279,7 +279,7 @@ func TestGroupServerWriteSurvivesLeaderCutoff(t *testing.T) {
 	admin.Join(map[int][]string{1: addrsFor(1)})
 	cfg := admin.Query(-1)
 
-	nodes, g1, transport, g1Cleanup := newTestGroupCluster(3, 1, ctrlers)
+	nodes, g1, transport, g1Cleanup := newTestGroupCluster(3, 1, ctrlers, -1)
 	defer g1Cleanup()
 	leaderID := waitForGroupLeader(t, nodes, 2*time.Second)
 	waitForGroupConfig(t, g1[leaderID], cfg.Num, 2*time.Second)
@@ -341,6 +341,7 @@ func TestGroupServerGetRefusesBeforeOwnNoopApplied(t *testing.T) {
 		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
+		maxRaftState:   -1,
 		stopCh:         make(chan struct{}),
 	}
 	// Deliberately not starting s.noopLoop() — driving the no-op by hand,
@@ -410,6 +411,7 @@ func TestGroupServerRejectsWriteThatArrivesAfterConfigRevokesOwnership(t *testin
 		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
+		maxRaftState:   -1,
 		stopCh:         make(chan struct{}),
 	}
 	go s.applyLoop()
@@ -491,6 +493,7 @@ func TestGroupServerRejectsOutOfOrderConfig(t *testing.T) {
 		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
+		maxRaftState:   -1,
 		stopCh:         make(chan struct{}),
 	}
 	go s.applyLoop()
@@ -543,9 +546,9 @@ func TestGroupServerDedupTableMovesWithShard(t *testing.T) {
 	admin.Join(map[int][]string{1: addrsFor(1), 2: addrsFor(2)})
 	cfg := admin.Query(-1)
 
-	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers)
+	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers, -1)
 	defer g1Cleanup()
-	nodes2, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers)
+	nodes2, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers, -1)
 	defer g2Cleanup()
 	groups := map[int][]*GroupServer{1: g1, 2: g2}
 	wirePeers(groups)
@@ -621,6 +624,7 @@ func TestGroupServerRefusesShardUntilMigrationCompletes(t *testing.T) {
 		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
+		maxRaftState:   -1,
 		stopCh:         make(chan struct{}),
 	}
 	go s.applyLoop()
@@ -764,6 +768,7 @@ func TestGroupServerMigratedDedupNeverRegresses(t *testing.T) {
 		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
+		maxRaftState:   -1,
 		stopCh:         make(chan struct{}),
 	}
 	go s.applyLoop()
@@ -867,9 +872,9 @@ func TestGroupServerGarbageCollectsMigratedShard(t *testing.T) {
 	admin.Join(map[int][]string{1: addrsFor(1), 2: addrsFor(2)})
 	cfg := admin.Query(-1)
 
-	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers)
+	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers, -1)
 	defer g1Cleanup()
-	nodes2, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers)
+	nodes2, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers, -1)
 	defer g2Cleanup()
 	groups := map[int][]*GroupServer{1: g1, 2: g2}
 	wirePeers(groups)
@@ -926,11 +931,11 @@ func TestConcurrentClientsThroughReconfiguration(t *testing.T) {
 	defer ctrlerCleanup()
 	admin := NewCtrlerClerk(ctrlers)
 
-	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers)
+	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers, -1)
 	defer g1Cleanup()
-	_, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers)
+	_, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers, -1)
 	defer g2Cleanup()
-	_, g3, _, g3Cleanup := newTestGroupCluster(3, 3, ctrlers)
+	_, g3, _, g3Cleanup := newTestGroupCluster(3, 3, ctrlers, -1)
 	defer g3Cleanup()
 	groups := map[int][]*GroupServer{1: g1, 2: g2, 3: g3}
 	wirePeers(groups) // groups 2 and 3 aren't in any config yet — harmless
