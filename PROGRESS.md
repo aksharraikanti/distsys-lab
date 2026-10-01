@@ -1,12 +1,12 @@
 # Progress
 
 Current stage: **05-sharded-kv**
-Current day: **Day 7 — A history checker** (next up)
+Current day: **Day 8 — Full integration** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
-Stage 5 (Sharded KV store) scoped into 8 days, Days 1-6 complete.
+Stage 5 (Sharded KV store) scoped into 8 days, Days 1-7 complete.
 
 ## Log
 
@@ -532,4 +532,22 @@ Stage 5 (Sharded KV store) scoped into 8 days, Days 1-6 complete.
   the common path" to: when the authority's failure is itself
   timing-dependent, test the gate in isolation. 15/15 clean stage runs and
   3/3 clean full-suite runs under `GOMAXPROCS=2 -race`.
+- 2026-10-01 — Stage 5 Day 7 (A history checker) complete: `History`/
+  `HistoryEntry` record real `[Invoke, Return)` intervals; `IsLinearizable`
+  splits per key (sound — no multi-key ops before Stage 7) and backtracks
+  per key, memoized on (placed-set, value) to stay clear of the naive
+  O(n!). Validated against hand-built stale read, lost write, duplicate
+  apply, and a genuinely concurrent pair of Appends that must accept
+  EITHER order. Mutation-checked the checker itself two ways: the
+  Get-result comparison collapsed to always-true (the literal "accepts
+  everything" risk) was caught by every "Rejects" test; the real-time
+  ordering check collapsed to always-false was caught ONLY by the
+  stale-read and lost-write tests specifically, whose argument depends on
+  real time leaving no other explanation — confirming each test earns its
+  place rather than just agreeing by coincidence. Run for real: 4 clients
+  on 2 SHARED keys (not private ones) through a live reconfiguration,
+  recorded via a new `RecordingShardClerk`, found linearizable — the actual
+  demonstration that Days 1-6's design holds up under the one anomaly
+  class the private-key trick was structurally blind to. 15/15 clean stage
+  runs and 3/3 clean full-suite runs under `GOMAXPROCS=2 -race`.
 
