@@ -139,9 +139,9 @@ func TestConcurrentClientsOnSharedKeysProduceALinearizableHistory(t *testing.T) 
 	defer ctrlerCleanup()
 	admin := NewCtrlerClerk(ctrlers)
 
-	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers)
+	nodes1, g1, _, g1Cleanup := newTestGroupCluster(3, 1, ctrlers, -1)
 	defer g1Cleanup()
-	_, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers)
+	_, g2, _, g2Cleanup := newTestGroupCluster(3, 2, ctrlers, -1)
 	defer g2Cleanup()
 	groups := map[int][]*GroupServer{1: g1, 2: g2}
 	wirePeers(groups)

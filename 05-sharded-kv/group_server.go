@@ -1,6 +1,8 @@
 package shardkv
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"sync"
 	"time"
@@ -93,6 +95,13 @@ type GroupServer struct {
 
 	noopAppliedTerm int
 
+	// maxRaftState bounds how large rf's persisted state is allowed to grow
+	// before applyLoop snapshots — KVServer's own field and reasoning (see
+	// its doc comment), unused by any day before this one since nothing
+	// here needed log compaction until a day actually combined long-running
+	// traffic, reconfiguration, and faults in one scenario. -1 disables it.
+	maxRaftState int
+
 	stopCh   chan struct{}
 	stopOnce sync.Once
 }
@@ -101,7 +110,16 @@ type GroupServer struct {
 // configs. Same split of responsibility as NewKVServer/NewCtrler: the
 // caller starts rf's own background loops; NewGroupServer starts only this
 // server's own consumers of them. Call Stop when done.
-func NewGroupServer(rf *raft.Raft, gid int, ctrl *CtrlerClerk) *GroupServer {
+//
+// maxRaftState is the size threshold (bytes of rf's persisted state) that
+// triggers a snapshot — see the field's own doc comment. Pass -1 to disable
+// snapshotting, which every day before this one did implicitly by never
+// having the field at all. If rf already has a snapshot persisted (this
+// node is restarting, not booting fresh), its state is restored before any
+// loop starts — same ordering KVServer's own constructor uses, and for the
+// same reason: those loops are the first things that could observe
+// (or mutate) this server's state once they're running.
+func NewGroupServer(rf *raft.Raft, gid int, ctrl *CtrlerClerk, maxRaftState int) *GroupServer {
 	s := &GroupServer{
 		rf:             rf,
 		gid:            gid,
@@ -111,7 +129,11 @@ func NewGroupServer(rf *raft.Raft, gid int, ctrl *CtrlerClerk) *GroupServer {
 		leaving:        make(map[int]int),
 		notifyChans:    make(map[int]chan groupApplyResult),
 		duplicateTable: make(map[int64]int64),
+		maxRaftState:   maxRaftState,
 		stopCh:         make(chan struct{}),
+	}
+	if data := rf.ReadSnapshot(); len(data) > 0 {
+		s.restoreSnapshot(data)
 	}
 	go s.applyLoop()
 	go s.noopLoop()
@@ -152,6 +174,65 @@ func (s *GroupServer) ownsLocked(key string) bool {
 	}
 	_, stillMigrating := s.migrating[shard]
 	return !stillMigrating
+}
+
+// groupSnapshot is everything a GroupServer needs to fully reconstruct its
+// state without replaying a single log entry — KVServer's own kvSnapshot
+// (Store, DuplicateTable), plus every piece of state this stage's own days
+// added on top: Cfg (which config this replica has adopted — restoring
+// store/duplicateTable without it would leave a replica with data but no
+// idea which shards it's actually allowed to serve), and Migrating/Leaving
+// (an in-flight migration or GC that was only HALF done as of the snapshot
+// must resume exactly where it left off, not be silently forgotten — a
+// forgotten `migrating` entry would mean this replica believes it owns a
+// shard it never actually finished pulling, and a forgotten `leaving` entry
+// would mean a shard never gets garbage-collected at all).
+type groupSnapshot struct {
+	Store          map[string]string
+	DuplicateTable map[int64]int64
+	Cfg            Config
+	Migrating      map[int]int
+	Leaving        map[int]int
+}
+
+// restoreSnapshot decodes data (as produced by snapshotLocked) and adopts
+// it as this GroupServer's entire state — wholesale, not merged in. Called
+// from two places, the same split KVServer's own restoreSnapshot is: from
+// NewGroupServer before any loop starts (no lock needed — nothing else can
+// be touching this server's state that early), and from applyLoop (Day 8,
+// via msg.SnapshotValid) when this replica's own Raft node just installed a
+// snapshot from its leader, under s.mu, since real client/background-loop
+// traffic can be racing it by then.
+func (s *GroupServer) restoreSnapshot(data []byte) {
+	var snap groupSnapshot
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&snap); err != nil {
+		panic(fmt.Sprintf("shardkv: group %d failed to decode persisted snapshot: %v", s.gid, err))
+	}
+	s.store = snap.Store
+	s.duplicateTable = snap.DuplicateTable
+	s.cfg = snap.Cfg
+	s.migrating = snap.Migrating
+	s.leaving = snap.Leaving
+}
+
+// snapshotLocked serializes the current state and hands it to Raft along
+// with index — the log index this state reflects — so Raft can discard its
+// own log through that point. Caller must hold s.mu.
+func (s *GroupServer) snapshotLocked(index int) {
+	buf := new(bytes.Buffer)
+	snap := groupSnapshot{
+		Store:          s.store,
+		DuplicateTable: s.duplicateTable,
+		Cfg:            s.cfg,
+		Migrating:      s.migrating,
+		Leaving:        s.leaving,
+	}
+	if err := gob.NewEncoder(buf).Encode(snap); err != nil {
+		panic(fmt.Sprintf("shardkv: group %d failed to encode snapshot: %v", s.gid, err))
+	}
+	if err := s.rf.Snapshot(index, buf.Bytes()); err != nil {
+		panic(fmt.Sprintf("shardkv: group %d failed to snapshot through index %d: %v", s.gid, index, err))
+	}
 }
 
 // applyLoop is 02-kv-store's applyLoop with a third command kind. Put/Append
@@ -208,6 +289,13 @@ func (s *GroupServer) applyLoop() {
 		case <-s.stopCh:
 			return
 		case msg = <-s.rf.ApplyCh:
+		}
+
+		if msg.SnapshotValid {
+			s.mu.Lock()
+			s.restoreSnapshot(msg.Snapshot)
+			s.mu.Unlock()
+			continue
 		}
 
 		op, ok := msg.Command.(groupOp)
@@ -280,6 +368,15 @@ func (s *GroupServer) applyLoop() {
 		if ch, waiting := s.notifyChans[msg.Index]; waiting {
 			delete(s.notifyChans, msg.Index)
 			ch <- result
+		}
+		// Checked after every applied entry, not on a separate timer — same
+		// reasoning as KVServer's own version of this check: RaftStateSize
+		// only grows one entry at a time, applyLoop already holds s.mu with
+		// a consistent, just-applied view of every piece of state
+		// snapshotLocked needs, and there's no way to overshoot the
+		// threshold between checks.
+		if s.maxRaftState != -1 && s.rf.RaftStateSize() >= s.maxRaftState {
+			s.snapshotLocked(msg.Index)
 		}
 		s.mu.Unlock()
 	}

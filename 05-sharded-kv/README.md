@@ -410,6 +410,74 @@ _(fill this in as you learn — one section per day, in your own words.)_
   was the actual confirmation each test earns its place, not just agrees
   with the others by coincidence.
 
+### Day 8 — Full integration
+- Snapshotting was the one piece of machinery this whole stage never needed
+  until today — not because it didn't matter, but because no earlier day's
+  own test ran long enough, or combined enough at once, to grow a Raft log
+  worth compacting. `GroupServer`'s version is `KVServer`'s own kvSnapshot
+  pattern (Day 6/7 of Stage 2) with three fields added: `Cfg`, `Migrating`,
+  `Leaving` — an in-flight migration or GC that was only half done as of the
+  snapshot has to resume exactly where it left off, not be silently
+  forgotten, or a replica could end up believing it owns a shard it never
+  actually finished pulling.
+- The genuinely interesting bug I found while building the snapshot test
+  was in the TEST, not the production code, and it's a sharp one worth
+  remembering: my first version disconnected a follower, forced a snapshot,
+  reconnected, and checked `cfg`/`leaving` came back correct. It passed —
+  even against a mutant that deleted `s.cfg = snap.Cfg` from
+  `restoreSnapshot` entirely. The reason: nothing changed `cfg` WHILE the
+  follower was disconnected in that version of the test, so "leave it
+  untouched" and "correctly restore it from the snapshot" produced the
+  IDENTICAL result. A broken restore is indistinguishable from a correct
+  one unless the test forces something to actually CHANGE during the
+  outage that only the snapshot could have delivered. Fixed by Moving a
+  second shard away from the group while the follower was down — now the
+  mutant fails immediately, because the follower's own `cfg.Num` would
+  stay stuck at its pre-outage value instead of jumping to what only the
+  snapshot could have told it.
+- The combined integration test is deliberately not four separate tests
+  glued together — reconfiguration, concurrent shared-key clients, repeated
+  crash/restart rounds across all three groups, and real snapshotting all
+  run at the SAME time, on purpose, because that's the only way to find out
+  whether they interact badly. They don't, as far as this run can tell:
+  `IsLinearizable` accepts the resulting history every time. That's a real,
+  if modest, result — Days 1 through 7 built seven separate pieces, and
+  this is the first time all seven have ever actually run together.
+- The honest-gap test is the most satisfying thing I've built in this
+  stage, not because it finds something new, but because it closes a loop
+  this project opened back in Stage 2 and has re-flagged at every stage
+  since: a leader silently partitioned away doesn't know it's been
+  superseded, and keeps answering reads from its own stale store. Today,
+  for the first time, that gap gets reproduced directly and on purpose —
+  Put "before," partition the leader, Put "after" through the new leader,
+  Get directly against the OLD leader, watch it return the stale value —
+  and then handed to Day 7's own checker, which correctly calls it out as
+  non-linearizable. The tool built yesterday recognizing the exact flaw
+  this project has been transparent about since Stage 2 is a nicer ending
+  to the stage than just another clean test run would have been.
+- Building that test surfaced something I hadn't expected: my first attempt
+  used `transport.Unregister(leaderID)` to "cut off" the leader, the same
+  primitive every earlier leader-cutoff test in this stage uses — and the
+  leader just kept right on committing new writes, because `Unregister`
+  only blocks calls DIRECTED AT the unregistered id. The leader's own
+  OUTGOING AppendEntries calls to its (still-registered) followers go
+  through `handlerFor(peer)`, which only checks the RECIPIENT — so an
+  "unregistered" leader can still replicate completely normally. I verified
+  this empirically with a throwaway test before trusting it. `Partition`/
+  `Heal` is the actually-correct primitive for isolating a specific node in
+  BOTH directions, and switching to it made the honest-gap test reproduce
+  reliably (15/15 clean runs). Stage 1's own crashed-leader fault test
+  (`01-raft/fault_injection_test.go`) gets this right already — it combines
+  `Unregister` with `StopElectionTimer` specifically because the two
+  together are what a real crash needs. This almost certainly means
+  several EARLIER leader-cutoff tests in this stage (Day 3's
+  `TestCtrlerSurvivesLeaderChange`, Day 4's
+  `TestGroupServerWriteSurvivesLeaderCutoff`) have been passing without
+  genuinely forcing the leadership change their own names claim — flagged
+  as a follow-up rather than fixed today, since auditing and correcting
+  several already-merged days' tests is a different, separate piece of
+  work from today's own scope.
+
 _(continue per day)_
 
 ## Reference material

@@ -174,11 +174,33 @@ correct while its shard moves.
       linearizable — the actual demonstration that Day 1-6's design holds up
       under the one anomaly class the private-key trick was structurally
       unable to see.
-- [ ] **Day 8 — Full integration.** Reconfiguration + concurrent clients + fault
+- [x] **Day 8 — Full integration.** Reconfiguration + concurrent clients + fault
       injection (group crashes, partitions, restarts) + snapshotting, all at
       once, judged by Day 7's checker. Whatever the earlier stages' known
       gaps are (Stage 2's stale-partitioned-leader `Get`) get their honest
       test here.
+      Added real snapshotting to `GroupServer` (`groupSnapshot`, restore-on-
+      construct, `SnapshotValid` in `applyLoop`, size-triggered
+      `snapshotLocked`) — the one mechanism this stage never needed until a
+      day combined long-running traffic with everything else. One combined
+      stress test: 4 clients on 3 shared keys, live reconfiguration, 6
+      repeated crash/restart rounds across 3 groups, real snapshotting (low
+      `maxRaftState`), judged by `IsLinearizable` — passes. A dedicated
+      snapshot test forces a follower to catch up via `InstallSnapshot`
+      after missing a REAL reconfiguration (not just writes) during its
+      outage, since "leave cfg/leaving untouched" and "correctly restore
+      them" are indistinguishable unless something actually changed while
+      disconnected — mutation-checked that distinction directly. A dedicated
+      "honest gap" test reproduces Stage 2's long-flagged stale-partitioned
+      -leader `Get` directly and proves Day 7's own checker flags the
+      resulting history as non-linearizable, closing the loop between the
+      two tools this stage built. Along the way, found that
+      `FakeTransport.Unregister` alone does not actually isolate a LEADER
+      (it only blocks incoming calls, not the leader's own outgoing
+      replication) — `Partition`/`Heal` is the correct primitive for that,
+      used in the honest-gap test; flagged as a follow-up since several
+      EARLIER days' "leader cutoff" tests may have been passing without
+      really exercising the fault they claimed to.
 
 ## Done means
 
