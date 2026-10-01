@@ -477,6 +477,21 @@ _(fill this in as you learn — one section per day, in your own words.)_
   as a follow-up rather than fixed today, since auditing and correcting
   several already-merged days' tests is a different, separate piece of
   work from today's own scope.
+- That follow-up is closed now. Both `TestCtrlerSurvivesLeaderChange` and
+  `TestGroupServerWriteSurvivesLeaderCutoff` switched from
+  `Unregister`/`Register` to `Partition`/`Heal`. Before touching either,
+  built a throwaway diagnostic that ran each primitive 15 times and
+  checked whether the leader's term or identity ever actually changed:
+  `Unregister` — 0/15; `Partition` — 1/15. The low hit rate for `Partition`
+  isn't a bug, it's the race both tests document on purpose ("win or lose
+  the race with commit"); the meaningful number is that `Unregister` was
+  provably always zero, confirming neither test had ever genuinely
+  exercised its own retry-to-new-leader path. The same bug, same shape,
+  turned up in 03-connection-pooling's `TestPoolLoadThroughRealFaults`
+  too ("the Raft leader is cut off, then rejoins" as one of three rotating
+  faults) and got the same fix. 02-kv-store's `integration_test.go` and
+  `stress_test.go` have the identical pattern and were deliberately left
+  alone — out of scope for this pass, noted for later.
 
 _(continue per day)_
 

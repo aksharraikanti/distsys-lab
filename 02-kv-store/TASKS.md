@@ -84,6 +84,27 @@ tested — "read about it" isn't done.
       elected can legitimately answer from state that hasn't caught back up
       yet — the same characteristic Day 5's `noopLoop` exists to bound, seen
       for the first time in a whole-cluster-restart context.
+- [x] **Follow-up — the "leader crash" fault in Day 5 and Day 8 wasn't.**
+      Both `TestConcurrentClientsWithFaultInjection` (Day 5) and
+      `TestFullIntegrationConcurrentClientsFaultsAndSnapshotting`'s own
+      "Crash fault" branch (Day 8) used `transport.Unregister(id)` on
+      whichever node currently believed itself leader. `Unregister` only
+      blocks calls DIRECTED AT the unregistered id; the leader's own
+      outgoing `CallAppendEntries`/`CallRequestVote` to its still-registered
+      followers go through `handlerFor(peer)`, which only checks the
+      recipient — so the "crashed" leader kept replicating to everyone else
+      completely normally the whole time. This was flagged (not fixed) back
+      when the identical bug was found and fixed in 05-sharded-kv's Day 3/4
+      tests and 03-connection-pooling's Day 6 test; closing it out here.
+      Switched both call sites to `transport.Partition([]int{id}, others)` /
+      `Heal`, which blocks both directions. Verified with a throwaway
+      diagnostic (3-node cluster, 15 runs each, checked whether the leader's
+      term or identity ever actually changed): `Unregister` — 0/15;
+      `Partition` — 15/15, confirming the old version never once actually
+      crashed the leader. `install_snapshot_test.go`'s `Unregister` call was
+      left alone — it targets a specific lagging follower on purpose, not
+      the leader. Reran both affected tests 10x under `-race`: clean. Full
+      `go test ./... -race` across the repo: clean.
 
 ## Done means
 

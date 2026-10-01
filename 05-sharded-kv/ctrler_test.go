@@ -293,16 +293,27 @@ func TestCtrlerSurvivesLeaderChange(t *testing.T) {
 	// Cut the leader off from the rest of the cluster shortly after
 	// proposing — win or lose the race with commit, the Clerk must still
 	// converge, either via this leader's own commit or a retry against
-	// whoever wins the resulting election.
+	// whoever wins the resulting election. This has to be Partition, not
+	// Unregister: Unregister only blocks calls DIRECTED AT the unregistered
+	// id, so the leader's own outgoing AppendEntries to its (still
+	// registered) followers keep going through unaffected and it just
+	// keeps committing normally — never forcing the "lose the race" branch
+	// this test claims to exercise. Partition blocks both directions.
+	var others []int
+	for id := range nodes {
+		if id != leaderID {
+			others = append(others, id)
+		}
+	}
 	time.Sleep(2 * time.Millisecond)
-	transport.Unregister(leaderID)
+	transport.Partition([]int{leaderID}, others)
 
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Join never completed after a leader cutoff")
 	}
-	transport.Register(leaderID, nodes[leaderID])
+	transport.Heal()
 
 	latest := ck.Query(-1)
 	if _, ok := latest.Groups[7]; !ok {

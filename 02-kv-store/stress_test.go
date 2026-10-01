@@ -144,11 +144,23 @@ func TestConcurrentClientsWithFaultInjection(t *testing.T) {
 			case <-faultStop:
 				return
 			case <-ticker.C:
+				// Partition, not Unregister: Unregister only blocks
+				// calls DIRECTED AT the cut-off id, so the leader's own
+				// outgoing AppendEntries to its still-registered
+				// followers keep going through unaffected and it just
+				// keeps replicating normally — never actually cutting
+				// it off. Partition blocks both directions.
 				for id, rf := range nodes {
 					if rf.State() == raft.Leader {
-						transport.Unregister(id)
+						var others []int
+						for otherID := range nodes {
+							if otherID != id {
+								others = append(others, otherID)
+							}
+						}
+						transport.Partition([]int{id}, others)
 						time.Sleep(2 * raft.ElectionTimeoutMax)
-						transport.Register(id, rf)
+						transport.Heal()
 						break
 					}
 				}

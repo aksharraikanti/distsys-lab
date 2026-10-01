@@ -83,6 +83,19 @@ Package: `pool` (import path `github.com/aksharraikanti/distsys-lab/03-connectio
       than the caller count. The test found a real Stage 2 bug — see the
       README — fixed here: `Get` now refuses to answer until a leader has
       applied a no-op from its own term (Raft §8).
+- [x] **Follow-up — the "leader cut off" fault wasn't.** `transport.Unregister`
+      only blocks calls DIRECTED AT the unregistered id; the leader's own
+      outgoing AppendEntries to its still-registered followers go through
+      `handlerFor(peer)`, which only checks the recipient — so "cutting off"
+      the leader this way left it replicating completely normally the whole
+      time. Day 6's rotating-fault loop had been doing exactly this since it
+      was written. Switched to `transport.Partition([]int{id}, others)` /
+      `Heal`, which blocks both directions. Verified with a throwaway
+      diagnostic in 05-sharded-kv (same transport, same bug, caught there
+      first): `Unregister` forced a real leadership change in 0/15 runs,
+      `Partition` in 1/15 — confirming the old version never once actually
+      isolated the leader. Reran `TestPoolLoadThroughRealFaults` 5x with
+      `-race` after the fix: still clean.
 
 ## Done means
 

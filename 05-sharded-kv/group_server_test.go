@@ -293,15 +293,27 @@ func TestGroupServerWriteSurvivesLeaderCutoff(t *testing.T) {
 		close(done)
 	}()
 
+	// Partition, not Unregister: Unregister only blocks calls DIRECTED AT
+	// the unregistered id, so the leader's own outgoing AppendEntries to
+	// its (still registered) followers keep going through unaffected and
+	// it just keeps committing normally — never forcing a genuine
+	// leadership change, which is what this test's name claims to force.
+	// Partition blocks both directions.
+	var others []int
+	for id := range nodes {
+		if id != leaderID {
+			others = append(others, id)
+		}
+	}
 	time.Sleep(2 * time.Millisecond)
-	transport.Unregister(leaderID)
+	transport.Partition([]int{leaderID}, others)
 
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Put never completed after a leader cutoff")
 	}
-	transport.Register(leaderID, nodes[leaderID])
+	transport.Heal()
 
 	if got := ck.Get(key); got != "durable" {
 		t.Fatalf("Get(%q) after leader cutoff = %q, want %q", key, got, "durable")
