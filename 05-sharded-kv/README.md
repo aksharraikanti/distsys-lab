@@ -357,6 +357,59 @@ _(fill this in as you learn — one section per day, in your own words.)_
   outer bound is a test-harness safety net against a real bug hanging
   forever, not a production timeout — the actual runs finish in ~150ms.
 
+### Day 7 — A history checker
+- Every stress test through Day 6 used one private key per client
+  specifically so a simple concatenation check would suffice — and that
+  trick has a structural blind spot, not just a weaker guarantee: it can
+  only ever notice a client's OWN writes going missing or reordering,
+  because no other client ever touches that key. Two clients racing on the
+  SAME key is exactly what sharding adds pressure to (a shard moving mid-
+  write is a new way for cross-client interleaving to go wrong), and the
+  private-key trick is structurally blind to it — not weaker at catching
+  it, blind. A real history checker was the only way to actually look.
+- Splitting the check per key is sound, not a shortcut, for a reason worth
+  stating plainly: this project has no multi-key operation of any kind
+  before Stage 7's distributed transactions, so two different keys' values
+  can NEVER depend on each other's order. A global linearization exists iff
+  an independent one does for every key — checking them independently isn't
+  an approximation, it's the same problem split into smaller pieces.
+- The search itself is Wing & Gong's original idea, not a simplification of
+  it: try to place operations into a sequential order one at a time, where
+  the ONLY operations ever excluded from being "next" are ones some other
+  not-yet-placed operation's real-time interval definitively forces ahead
+  of them. Everything else — including every pair of truly concurrent
+  operations — is fair game to try in either order, which is exactly what
+  `TestIsLinearizableAcceptsEitherOrderOfConcurrentAppends` exists to prove
+  isn't just theoretical: the search really does explore both and accepts
+  whichever one the recorded Get actually matches.
+- Memoizing on (which operations are placed, what the register's value is)
+  turns the naive O(n!) search into something bounded by the number of
+  distinct reachable states — for the sizes this project's own tests
+  generate (a handful of clients, a handful of ops each), the real run in
+  `TestConcurrentClientsOnSharedKeysProduceALinearizableHistory` (4 clients
+  × 15 ops across 2 keys) checked in well under the time the cluster itself
+  took to run.
+- Validating the checker was the actual point of this day more than writing
+  it was, and TASKS.md's own three named failure modes (stale read, lost
+  write, duplicate apply) all come from the same root cause in this
+  register's semantics: each is a case where only ONE linearization is even
+  possible (no concurrency to hide behind), and the recorded result doesn't
+  match it. Mutation-testing the checker ITSELF — not just running it
+  against hand-built bad histories, but breaking the checker's own logic and
+  confirming those exact tests notice — split cleanly into two independent
+  failure modes: collapsing the Get-result comparison to always-true is the
+  literal "accepts everything" risk TASKS.md calls out by name, and every
+  single "Rejects" test catches it. Collapsing the real-time ordering check
+  to always-false (no operation ever forced before another) is a narrower,
+  different bug — and ONLY the stale-read and lost-write tests catch it,
+  because those two are the only ones whose argument depends on real time
+  leaving no other possibility; duplicate-apply and the cross-client
+  anomaly test are about whether a value is achievable AT ALL regardless of
+  ordering freedom, so they stay correct even when ordering is (wrongly)
+  unconstrained. Seeing the test failures split exactly along that line
+  was the actual confirmation each test earns its place, not just agrees
+  with the others by coincidence.
+
 _(continue per day)_
 
 ## Reference material

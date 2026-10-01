@@ -149,13 +149,31 @@ correct while its shard moves.
       of the gate itself, the same "test the authority, not the common
       path" lesson from Day 4, now generalized to "a real bug can be timing
       -dependent to observe; test the gate directly when it can be."
-- [ ] **Day 7 — A history checker.** The private-key-per-client trick every
+- [x] **Day 7 — A history checker.** The private-key-per-client trick every
       test so far uses cannot detect cross-client anomalies, and sharding
       creates new ones. Record every operation's `(invoke time, return time,
       argument, result)` and check per-key linearizability of the whole run
       (a Wing-Gong-style search). Validate the checker itself first — it must
       reject hand-built bad histories (stale read, lost write, duplicate
       apply), since a checker that accepts everything is worse than none.
+      `History`/`HistoryEntry` record real `[Invoke, Return)` intervals;
+      `IsLinearizable` splits per key (sound here — no multi-key ops before
+      Stage 7) and backtracks per key, memoized on (placed-set, value) to
+      stay well clear of the naive O(n!). Validated against hand-built stale
+      read, lost write, duplicate apply, AND a genuinely concurrent pair of
+      Appends that must accept EITHER order — then mutation-checked the
+      checker itself two ways: the Get-result check collapsed to always-true
+      was caught by every "Rejects" test (the literal "accepts everything"
+      risk TASKS.md names); the real-time ordering check collapsed to
+      always-false (no constraint ever enforced) was caught specifically by
+      the stale-read and lost-write tests, whose whole premise is that real
+      time leaves no other explanation — confirming each test is pulling its
+      own weight, not just agreeing by coincidence. Then run for real: 4
+      clients on 2 SHARED keys (not private ones) through a live
+      reconfiguration, recorded via `RecordingShardClerk`, checked and found
+      linearizable — the actual demonstration that Day 1-6's design holds up
+      under the one anomaly class the private-key trick was structurally
+      unable to see.
 - [ ] **Day 8 — Full integration.** Reconfiguration + concurrent clients + fault
       injection (group crashes, partitions, restarts) + snapshotting, all at
       once, judged by Day 7's checker. Whatever the earlier stages' known
