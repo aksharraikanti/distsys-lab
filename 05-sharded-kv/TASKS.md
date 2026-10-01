@@ -201,6 +201,35 @@ correct while its shard moves.
       used in the honest-gap test; flagged as a follow-up since several
       EARLIER days' "leader cutoff" tests may have been passing without
       really exercising the fault they claimed to.
+- [x] **Follow-up — auditing the earlier `Unregister(leaderID)` tests.** Day
+      8 flagged this and deferred it; closed it out separately. Audited
+      every `transport.Unregister` call in this stage (and 03's) that
+      targets a variable representing the CURRENT LEADER specifically, not
+      a generic/follower node: Day 3's `TestCtrlerSurvivesLeaderChange` and
+      Day 4's `TestGroupServerWriteSurvivesLeaderCutoff` both qualified —
+      both switched to `Partition`/`Heal`. (Day 8's own `integration_test.go`
+      already had two more `Unregister` calls, but neither targets a leader
+      specifically — one disconnects a named follower on purpose to force a
+      snapshot catch-up, the other round-robins through every replica id
+      "so both leaders and followers get crashed," which is the point —
+      left both alone.) Built a throwaway diagnostic (`newTestCtrlerCluster`
+      + 15 runs each) before touching anything, to make sure the fix had
+      actual teeth rather than just looking more correct: `Unregister`
+      forced a genuine leadership change in 0/15 runs; `Partition` did in
+      1/15 (the rest won the race and committed through the original
+      leader before the cutoff landed — expected, since both tests
+      explicitly accept "wins the race" as a valid outcome by design). That
+      1/15 is the whole point — under `Unregister` it was provably always
+      0, meaning the retry-to-new-leader path these two tests are named
+      for was never actually exercised. Re-ran each fixed test 20x with
+      `-race` after switching: still 20/20 clean. Also found the identical
+      bug, same shape, in 03-connection-pooling's `TestPoolLoadThroughRealFaults`
+      ("the Raft leader is cut off, then rejoins" as one of three rotating
+      faults) — fixed the same way, reran 5x with `-race`, clean. Did NOT
+      touch 02-kv-store's `integration_test.go`/`stress_test.go`, which have
+      the exact same pattern (`Unregister` on whichever node is currently
+      Leader) — out of scope for this pass, but worth its own follow-up
+      later.
 
 ## Done means
 

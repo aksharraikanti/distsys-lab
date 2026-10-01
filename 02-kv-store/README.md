@@ -358,6 +358,27 @@ until `noopAppliedTerm` equals the current term; clients already retry that.
 Still not fully linearizable — a silently partitioned old leader can answer
 from a stale store; that needs read-index or leases.
 
+### Post-completion fix — the "leader crash" fault was a no-op
+Day 5's `TestConcurrentClientsWithFaultInjection` and Day 8's
+`TestFullIntegrationConcurrentClientsFaultsAndSnapshotting` both simulated
+"crashing" whichever node currently held leadership with
+`transport.Unregister(id)`. `Unregister` only blocks calls directed AT the
+unregistered id — the leader's own outgoing `CallAppendEntries`/
+`CallRequestVote` calls to its still-registered followers look up the
+handler keyed on the *recipient*, not the caller, so they went through
+completely unaffected. The "crashed" leader just kept replicating normally
+the whole time; the fault had no real effect. Same bug, same root cause, as
+the one already found and fixed in 05-sharded-kv's Day 3/4 tests and
+03-connection-pooling's Day 6 test — flagged there as a known gap in this
+stage's tests, now closed. Switched both call sites to
+`transport.Partition([]int{id}, others)` / `Heal`, which blocks both
+directions. Confirmed the bug was real (not just theoretical) with a
+throwaway diagnostic: 15 runs each on a 3-node cluster, checking whether the
+leader's term or identity ever changed — `Unregister` 0/15, `Partition`
+15/15. `install_snapshot_test.go`'s `Unregister` call was left as-is; it
+targets a specific lagging follower, not the leader, so the bug doesn't
+apply there.
+
 _(continue per day)_
 
 ## Reference material

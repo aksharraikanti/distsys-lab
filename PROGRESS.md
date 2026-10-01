@@ -602,4 +602,45 @@ Stage 6 (Hot shard detection and splitting) scoped into 6 days, Day 1 complete.
   hash can ever fall "before" it) — refactored into an internal
   point-based `ringAssignPoint` so a hand-built ring could exercise it
   directly. 20/20 clean stage runs under `-race`.
+- 2026-10-01 — Follow-up: closed the `Unregister(leaderID)` gap Stage 5 Day
+  8 flagged and deferred. Audited every `transport.Unregister` call in
+  Stage 3 and Stage 5 that targets whichever node is CURRENTLY leader
+  (not a generic/follower node): Stage 5's `TestCtrlerSurvivesLeaderChange`
+  (Day 3) and `TestGroupServerWriteSurvivesLeaderCutoff` (Day 4), plus the
+  identical pattern in Stage 3's `TestPoolLoadThroughRealFaults` (Day 6,
+  its "the Raft leader is cut off" fault). All three switched from
+  `Unregister`/`Register` to `Partition`/`Heal`. Verified the fix had real
+  teeth before trusting it: a throwaway diagnostic ran each primitive 15
+  times against a 3-node controller cluster and checked whether the
+  leader's term or identity ever actually changed — `Unregister`: 0/15;
+  `Partition`: 1/15. The low `Partition` rate isn't a bug, it's the race
+  both tests document on purpose ("win or lose the race with commit"); the
+  load-bearing number is that `Unregister` was provably always zero,
+  confirming the retry-to-new-leader path these tests are named for had
+  never once actually fired. Reran the two Stage 5 tests 20x and the
+  Stage 3 test 5x, all under `-race`: clean. Stage 5's own
+  `integration_test.go` has two more `Unregister` calls that were
+  deliberately left alone — one targets a named follower on purpose, the
+  other round-robins through every replica id "so both leaders and
+  followers get crashed," which is the point, not a bug. Stage 2's
+  `integration_test.go`/`stress_test.go` have the same leader-targeting
+  pattern and were NOT touched — out of scope for this pass, left for a
+  later follow-up. Full `go test ./... -race` clean.
+- 2026-10-01 — Follow-up: closed the Stage 2 half of the same
+  `Unregister(leaderID)` gap, left out of the previous entry on purpose.
+  Confirmed both `TestConcurrentClientsWithFaultInjection` (Day 5) and
+  `TestFullIntegrationConcurrentClientsFaultsAndSnapshotting`'s "Crash
+  fault" branch (Day 8) target whichever node is CURRENTLY leader
+  specifically, same shape as the already-fixed Stage 3/5 tests. Switched
+  both from `Unregister`/`Register` to `Partition`/`Heal`. Same
+  verification approach: a throwaway diagnostic on a 3-node cluster, 15
+  runs each, checking whether the leader's term or identity ever actually
+  changed — `Unregister`: 0/15; `Partition`: 15/15 (every run forces a new
+  leader here, unlike Stage 3/5's 1/15, because a 3-node cluster's cut-off
+  leader can never win the commit race the way a larger cluster
+  sometimes does — it's isolated from the only other majority-capable
+  peers immediately). `install_snapshot_test.go`'s `Unregister` call was
+  left alone — it targets a named lagging follower, not the leader.
+  Reran both affected tests 10x under `-race`: clean. Full
+  `go test ./... -race` across the repo: clean.
 
