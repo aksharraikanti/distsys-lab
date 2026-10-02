@@ -1,13 +1,13 @@
 # Progress
 
 Current stage: **06-hot-shard-splitting**
-Current day: **Day 3 — Hot shard detection** (next up)
+Current day: **Day 4 — Splitting a shard (replicated)** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
 Stage 5 (Sharded KV store) complete, all 8 days.
-Stage 6 (Hot shard detection and splitting) scoped into 6 days, Days 1-2 complete.
+Stage 6 (Hot shard detection and splitting) scoped into 6 days, Days 1-3 complete.
 
 ## Log
 
@@ -656,4 +656,11 @@ Stage 6 (Hot shard detection and splitting) scoped into 6 days, Days 1-2 complet
   ownership transfer with nothing left to race on. Mutation-checked:
   deleting the reset was caught immediately by the reset-semantics test.
   20/20 clean stage runs and a full clean `go test ./... -race`.
-
+- 2026-10-02 — Stage 6 Day 3 (Hot shard detection) complete: pure
+  `DetectHot(loads, shards, HotPolicy)` plus `MergeLoads`. A shard is hot
+  when its load strictly exceeds `Factor` x the mean over ALL ring shards
+  (idle shards absent from a Snapshot count as zero, otherwise a single
+  busy shard among idle ones is its own mean and never flags); optional
+  `MinLoad` floor; hottest-first deterministic ordering. Mutation-checked:
+  `>=` threshold and mean-over-reported-only were both caught. No polling
+  or cluster wiring yet, that's Day 5. Stage run clean under `-race`.
