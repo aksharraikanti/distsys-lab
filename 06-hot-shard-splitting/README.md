@@ -150,6 +150,27 @@ _(fill this in as you learn — one section per day, in your own words.)_
 - Midpoint is computed mod 2^32 because a shard's range can wrap past the top
   of the hash space; the one-shard ring (width 2^32) is the same case.
 
+### Day 5 — Automatic splitting end-to-end
+- Split alone doesn't relieve anything: both halves start on the same group.
+  The mutation that deleted the `Move` is the cleanest demonstration; the
+  hot group's share never drops without it. Detection, split and move are
+  three separate steps because each answers a different question (what's
+  hot, how many shards exist, who serves which) and Days 1-4 kept them
+  separate on purpose.
+- One split per `Step`. After the first split the loads of every other
+  flagged shard describe a ring that no longer exists; acting on them would
+  compound a stale picture. The next window measures the new ring.
+- A split can only help if the load is divisible. A hot RANGE halves
+  nicely; a single hot KEY is one point on the ring and no split can divide
+  it, so the splitter would re-flag the narrowing range forever.
+  `MaxShards` is the blunt guard, and the honest limitation is that this
+  stage can't tell the two cases apart (a real system would also notice a
+  split that didn't reduce the hot half's load).
+- The data plane here is simulated: per-group `LoadTracker`s fed by routing
+  requests through the live replicated config. There is no ring-based
+  `GroupServer` (Day 2 deliberately left that out), so migration of the
+  moved half isn't exercised yet; that is Day 6's integration question.
+
 _(continue per day)_
 
 ## Reference material
