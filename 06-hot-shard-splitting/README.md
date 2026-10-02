@@ -128,6 +128,28 @@ _(fill this in as you learn — one section per day, in your own words.)_
   concession to noise: relative-only logic would flag 1 request against a
   mean of 0.1.
 
+### Day 4 — Splitting a shard (replicated)
+- Stage 5's `Ctrler` couldn't just gain a Split op: its `Config` is a fixed
+  `[NShards]int`, so there's nowhere to put a shard that didn't exist at
+  compile time. `RingConfig` is the same idea (versioned, immutable,
+  pure-function transitions) over a `Ring` plus an `Owners` map — which is
+  also where Day 1's decision to keep ownership out of `Ring` pays off:
+  `Split` only ever had to touch the ring, and `SplitConfig` just copies the
+  owner onto the new half.
+- A split is invisible to routing by construction: both halves start on the
+  same group, so every key resolves to the group it did a version ago, and
+  moving half away is a separate ordinary `Move`. That's the property test.
+- The gap Stage 5 documented and accepted (Move validated BEFORE proposing,
+  racing a concurrent Leave) is not acceptable for Split: two proposers
+  deciding to split the same hot shard from the same config is the normal
+  case, not a corner. So validation moved to apply time, deterministic on
+  every replica, with the verdict carried back through the notify channel.
+  The dedup table had to store that verdict too — my first version returned
+  OK for any retry, and a mutation showed no test noticed, i.e. a client
+  retrying a rejected split would have been told it succeeded.
+- Midpoint is computed mod 2^32 because a shard's range can wrap past the top
+  of the hash space; the one-shard ring (width 2^32) is the same case.
+
 _(continue per day)_
 
 ## Reference material
