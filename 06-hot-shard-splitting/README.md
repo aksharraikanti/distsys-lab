@@ -109,6 +109,25 @@ _(fill this in as you learn — one section per day, in your own words.)_
   ever," which is a correctness bug a hot-shard detector built on top of it
   would never be able to tell apart from a genuinely still-hot shard.
 
+### Day 3 — Hot shard detection
+- "Hot" had to be relative to be meaningful, and the subtle part is what
+  the mean is taken over. `LoadTracker.Snapshot` omits shards with zero
+  traffic, so averaging only the shards that reported would shrink the
+  denominator exactly when the cluster is most skewed: one busy shard
+  among seven idle ones would be its own mean and never trip a threshold.
+  `DetectHot` takes the full shard list from the caller and treats absence
+  as zero.
+- Kept it pure on purpose: loads in, flagged shards out. Polling groups
+  and acting on the result is Day 5's job; this day only has to be right
+  about the decision. `MergeLoads` exists because a shard that moves
+  mid-window can show up in two groups' reports and its real load is the
+  sum.
+- The threshold is strict (`>`), so a perfectly even cluster, where every
+  shard sits at exactly 1x the mean, can never flag anything regardless of
+  Factor >= 1. `MinLoad` is a separate absolute floor, a deliberate small
+  concession to noise: relative-only logic would flag 1 request against a
+  mean of 0.1.
+
 _(continue per day)_
 
 ## Reference material

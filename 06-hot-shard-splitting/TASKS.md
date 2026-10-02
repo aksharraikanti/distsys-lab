@@ -89,13 +89,23 @@ instead of a fixed bucket.
       server even exists to own it. Mutation-checked: `Snapshot` not
       actually resetting its counts was caught immediately by the
       reset-semantics test.
-- [ ] **Day 3 — Hot shard detection.** A monitor (polling every group the
+- [x] **Day 3 — Hot shard detection.** A monitor (polling every group the
       way `ShardClerk` already knows how to reach them) aggregates load
       reports and flags a shard "hot" by a threshold relative to the mean
       across all shards — not an absolute number, since "hot" only means
       anything relative to how loaded everything else currently is. Pure
       decision logic first, tested against synthetic load reports before
       it ever touches a real cluster.
+      Built `DetectHot(loads, shards, HotPolicy)` + `MergeLoads` as pure
+      functions, no cluster or polling loop yet (that's Day 5's wiring).
+      A shard is hot when its load strictly exceeds `Factor` x the mean
+      over ALL shards in the ring — idle shards absent from a `Snapshot`
+      count as zero in the mean, or one reporting shard would be its own
+      mean and never look hot. Optional `MinLoad` floor keeps near-idle
+      clusters from flagging noise. Result is hottest-first, ties by
+      ShardID. Mutation-checked: `>=` for `>` and mean-over-reported-only
+      were both caught.
+
 - [ ] **Day 4 — Splitting a shard (replicated).** A `Split` operation on the
       ring: pick a hot shard's range, choose a split point (the range's
       midpoint to start; a load-weighted point is future work, not this
