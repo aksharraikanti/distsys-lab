@@ -1,13 +1,13 @@
 # Progress
 
 Current stage: **06-hot-shard-splitting**
-Current day: **Day 4 — Splitting a shard (replicated)** (next up)
+Current day: **Day 5 — Automatic splitting end-to-end** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
 Stage 5 (Sharded KV store) complete, all 8 days.
-Stage 6 (Hot shard detection and splitting) scoped into 6 days, Days 1-3 complete.
+Stage 6 (Hot shard detection and splitting) scoped into 6 days, Days 1-4 complete.
 
 ## Log
 
@@ -664,3 +664,14 @@ Stage 6 (Hot shard detection and splitting) scoped into 6 days, Days 1-3 complet
   `MinLoad` floor; hottest-first deterministic ordering. Mutation-checked:
   `>=` threshold and mean-over-reported-only were both caught. No polling
   or cluster wiring yet, that's Day 5. Stage run clean under `-race`.
+- 2026-10-02 — Stage 6 Day 4 (Splitting a shard, replicated) complete:
+  `RingConfig` with pure `SplitConfig`/`MoveRingShard`/`Midpoint`, and
+  `RingCtrler`, Stage 5's Ctrler machinery over a ring-config history
+  (Init/Split/Move/Query). Parallel type, not a modification — Stage 5's
+  `Config` is a fixed array. Both split halves stay on the current owner,
+  so a split never changes any key's group (property-tested). Ops are
+  validated at apply time with the verdict returned to the proposer,
+  closing the check-then-commit gap Stage 5's Move documented; dedup stores
+  the verdict so retries of a rejected op aren't told OK. Mutation-checked
+  (3 mutants; the retry-verdict one initially survived, test added).
+  Stage run clean 15x under `-race`.

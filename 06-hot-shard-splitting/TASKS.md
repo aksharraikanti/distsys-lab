@@ -106,7 +106,7 @@ instead of a fixed bucket.
       ShardID. Mutation-checked: `>=` for `>` and mean-over-reported-only
       were both caught.
 
-- [ ] **Day 4 — Splitting a shard (replicated).** A `Split` operation on the
+- [x] **Day 4 — Splitting a shard (replicated).** A `Split` operation on the
       ring: pick a hot shard's range, choose a split point (the range's
       midpoint to start; a load-weighted point is future work, not this
       day's), and replace the one range with two, BOTH initially assigned to
@@ -114,6 +114,22 @@ instead of a fixed bucket.
       Stage 5 Day 2's own "assignment first, migration follows" philosophy.
       Proposed through `Ctrler` as a new config version, same as Stage 5's
       `Join`/`Leave`/`Move`.
+      Built `RingConfig` (Num, Ring, Owners, Groups) with pure `SplitConfig`
+      / `MoveRingShard` / `Midpoint`, and `RingCtrler`: Stage 5's `Ctrler`
+      machinery (apply loop, dedup, leader no-op before Query) over a
+      `RingConfig` history, with Init/Split/Move/Query. Both halves of a
+      split stay on the current owner, property-tested: no key's group
+      changes across a split. Stage 5's `Ctrler` itself couldn't be reused —
+      its `Config` is a fixed `[NShards]int` — so this is a parallel type,
+      not a modification; Join/Leave weren't carried over (Stage 5's
+      rebalance is defined over the fixed array). Unlike Stage 5's Move,
+      every op is validated at APPLY time and the verdict returned through
+      the notify channel, so a stale split (shard already split) reports
+      `ErrInvalidArgs` and leaves history untouched; the dedup table
+      stores the verdict so a retry hears the same answer. Mutation-checked:
+      wrong owner for the new half, disabled dedup, and a retry returning
+      false OK were all caught (the last one only after adding a test for it).
+
 - [ ] **Day 5 — Automatic splitting end-to-end.** Wire Day 3's detector to
       actually propose Day 4's `Split` once a shard crosses the hot
       threshold, then — since the newly split shard is still on the same
