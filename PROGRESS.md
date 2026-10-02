@@ -1,13 +1,13 @@
 # Progress
 
 Current stage: **06-hot-shard-splitting**
-Current day: **Day 5 — Automatic splitting end-to-end** (next up)
+Current day: **Day 6 — Full integration under a real skewed workload** (next up)
 Status: Stage 1 (Raft consensus from scratch) complete, all 12 days.
 Stage 2 (Fault-tolerant KV store on Raft) complete, all 8 days.
 Stage 3 (Connection pooling layer) complete, all 6 days.
 Stage 4 (Caching layer) complete, all 6 days.
 Stage 5 (Sharded KV store) complete, all 8 days.
-Stage 6 (Hot shard detection and splitting) scoped into 6 days, Days 1-4 complete.
+Stage 6 (Hot shard detection and splitting) scoped into 6 days, Days 1-5 complete.
 
 ## Log
 
@@ -675,3 +675,13 @@ Stage 6 (Hot shard detection and splitting) scoped into 6 days, Days 1-4 complet
   the verdict so retries of a rejected op aren't told OK. Mutation-checked
   (3 mutants; the retry-verdict one initially survived, test added).
   Stage run clean 15x under `-race`.
+- 2026-10-02 — Stage 6 Day 5 (Automatic splitting end-to-end) complete:
+  `AutoSplitter.Step` wires detection to a replicated `Split` then a `Move`
+  of the new half to the least-loaded group, one split per step, capped by
+  `MaxShards`; `RingClerk` is the retrying clerk for `RingCtrler`. Proven
+  against a simulated data plane (per-group `LoadTracker`s routed by the
+  live config; no ring-based `GroupServer` exists yet): 80% of traffic on
+  one shard took the busiest group's share from 0.87 to 0.37 over 6 splits;
+  uniform load triggers none; a single hot key is bounded by `MaxShards`.
+  Mutation-checked (no Move, no cap, move-to-hottest all caught). Open for
+  Day 6: real data migration of the moved half. Clean 10x under `-race`.

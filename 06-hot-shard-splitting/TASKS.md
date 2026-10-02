@@ -130,13 +130,28 @@ instead of a fixed bucket.
       wrong owner for the new half, disabled dedup, and a retry returning
       false OK were all caught (the last one only after adding a test for it).
 
-- [ ] **Day 5 — Automatic splitting end-to-end.** Wire Day 3's detector to
+- [x] **Day 5 — Automatic splitting end-to-end.** Wire Day 3's detector to
       actually propose Day 4's `Split` once a shard crosses the hot
       threshold, then — since the newly split shard is still on the same
       group — a normal `Move` (Stage 5, unchanged) relocates it to relieve
       the group that was hot. Prove it with a synthetically skewed key
       distribution: one shard gets most of the traffic, the system splits
       it and moves half away, and the originally-hot group's load drops.
+      Built `AutoSplitter.Step` (query config, read merged loads,
+      `DetectHot`, `Split` the hottest at its `Midpoint`, confirm the new
+      half is the one minted and still on the original owner, then `Move`
+      it to the least-loaded group) over a small `RingAPI` interface, plus
+      `RingClerk`, the retrying in-process clerk for `RingCtrler`. One
+      split per Step on purpose: the other flagged shards' loads were
+      measured against the ring that split just changed. `MaxShards` caps
+      growth so one hot KEY (an undividable ring point) can't be chased
+      forever. Proven against a skewed simulated data plane (per-group
+      `LoadTracker`s routed by the live replicated config) because no
+      ring-based `GroupServer` exists yet: with 80% of traffic on one shard,
+      the busiest group's share went 0.87 -> 0.37 over 6 splits; uniform
+      load triggers no splits. Mutation-checked: no Move, no `MaxShards`,
+      and moving to the HOTTEST group were all caught.
+
 - [ ] **Day 6 — Full integration under a real skewed workload.** A Zipfian
       load test (Stage 4's own precedent) against a multi-group cluster with
       detection and auto-splitting both live, measuring whether throughput
